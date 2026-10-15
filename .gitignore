@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 打包产物
+build/
+dist/
+*.spec.bak
+
+# 运行期生成（配置/日志/导出）
+pycom.json
+pycom_smoke.json
+PyCom-Log-*.txt
+received.txt
+received.bin
+
+# 工具缓存
+.pytest_cache/
+.mimosa/

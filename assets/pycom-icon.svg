@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e3a8a"/>
+      <stop offset="0.55" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="globeFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0f2fe" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="termFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111c33"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 蓝色圆角方形背景 -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- 互联网球形 -->
+  <circle cx="256" cy="168" r="112" fill="url(#globeFill)"/>
+  <g stroke="#bae6fd" stroke-width="7" fill="none" opacity="0.95">
+    <ellipse cx="256" cy="168" rx="112" ry="44"/>
+    <ellipse cx="256" cy="168" rx="112" ry="86"/>
+    <ellipse cx="256" cy="168" rx="46" ry="112"/>
+    <ellipse cx="256" cy="168" rx="88" ry="112"/>
+  </g>
+  <circle cx="256" cy="168" r="112" fill="none" stroke="#e0f2fe" stroke-width="8"/>
+
+  <!-- 终端窗口 -->
+  <rect x="80" y="260" width="352" height="200" rx="26"
+        fill="url(#termFill)" stroke="#38bdf8" stroke-width="4"/>
+  <line x1="80" y1="308" x2="432" y2="308" stroke="#1e3a5f" stroke-width="3"/>
+  <circle cx="112" cy="284" r="7" fill="#f87171"/>
+  <circle cx="136" cy="284" r="7" fill="#fbbf24"/>
+  <circle cx="160" cy="284" r="7" fill="#4ade80"/>
+
+  <!-- 终端提示符 >_ -->
+  <path d="M116 336 L152 366 L116 396" fill="none" stroke="#ffffff"
+        stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M164 396 H196" stroke="#ffffff" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- TX 发送箭头 -->
+  <path d="M250 348 H385" stroke="#4ade80" stroke-width="12" stroke-linecap="round"/>
+  <path d="M385 348 L365 332 M385 348 L365 364" stroke="#4ade80"
+        stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- RX 接收箭头 -->
+  <path d="M390 408 H255" stroke="#22d3ee" stroke-width="12" stroke-linecap="round"/>
+  <path d="M255 408 L275 392 M255 408 L275 424" stroke="#22d3ee"
+        stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
