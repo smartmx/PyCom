@@ -10,6 +10,7 @@ dist/
 
 # 运行期生成（配置/日志/导出）
 pycom.json
+pycom32.json
 pycom_smoke.json
 PyCom-Log-*.txt
 received.txt

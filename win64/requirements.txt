@@ -1,0 +1,8 @@
+# 运行依赖（Python 3.13 / 64 位 / Windows 10+）
+PySide6==6.12.0
+
+# 开发/测试（可选）
+pytest==9.1.1
+
+# 打包（可选，tools\build_exe.bat 使用）
+pyinstaller==6.22.2

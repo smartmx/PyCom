@@ -1,0 +1,9 @@
+# 运行依赖（Python 3.8.10 32 位 / Windows 7 SP1+）
+PySide2==5.15.2.1
+
+# 开发/测试（可选）
+pytest==8.3.5
+
+# 打包（可选，tools\build_exe.bat 使用；必须 5.x——6.x 不支持 Python 3.8
+# 且 spec 语法不兼容本分支）
+pyinstaller==5.13.2

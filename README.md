@@ -1,76 +1,103 @@
-# PyCom 串口/网络数据调试器
+# PyCom 开发工程（总入口）
 
-轻量的串口 / TCP / UDP 调试工具，使用 Python + PySide6（Qt6）从零实现，功能布局参考 SSCOM 5.13.1。绿色便携、无广告、开源（MIT）。
+**PyCom**：用 Python 从头复刻 SSCOM 5.13.1 串口/网络调试器（串口 + TCP
+客户端/服务端 + UDP、收发全套、多条发送、校验、发送文件、终端仿真、转换
+计算器、原版 sscom51.ini 导入），并增强：多编码显示、大缓冲、搜索高亮、
+断线自动重连、深色模式。无广告、无联网。技术栈 PySide（QtSerialPort，
+无 pyserial）+ PyInstaller 打包。
 
-![PyCom 浅色主题](docs/screenshot_light.png)
+本目录收纳**完整的两套工程**与全部文档：
 
-![PyCom 深色主题](docs/screenshot_dark.png)
+| 目录 | 应用名 | 技术栈 | 目标系统 | 版本 |
+|---|---|---|---|---|
+| [`win64/`](win64/) | **PyCom** | Python 3.13（64 位）+ PySide6 / Qt6 | Windows 10+ | V0.0.2 |
+| [`win32/`](win32/) | **PyCom32** | Python 3.8.10（**32 位**）+ PySide2 / Qt5 | Windows 7 SP1+（32/64 位） | V0.0.2 |
 
-## 功能特性
-
-- **通讯通道**：串口；TCP 客户端 / TCP 服务端 / UDP（三模式共用一套收发体验，网卡选择联动本地 IP，断线自动重连）
-- **接收显示**：HEX / ASCII 切换、12 种预置编码 + 任意 Python 编码名、时间戳与分包显示（包首行 `[时:分:秒.毫秒]收←◆ / 发→◇`）、收发着色、多字体设置、搜索高亮（绝对行号定位）、显示缓冲上限 200K~512M（默认 128MB，溢出自动丢最旧）、接收转存 txt、保存原始字节
-- **发送**：文本/HEX、加回车换行、定时发送、多条字符串发送（ASC/HEX、顺序号、逐条延时、循环发送、单击发送）、发送文件（256 字节分块、延时档位、进度与停止）、7 种校验算法（ModbusCRC16/CCITT_CRC16/CRC8/XOR8/ADD8/ADD16/无）与 SSCOM 同语义的帧尾档位
-- **终端仿真**：光标放进接收区即可输入——回车发送整行（自带回显），或按键立即发送键值；两种方式互斥
-- **界面**：浅色 / 深色主题（标题栏跟随）、窗口可缩到只剩配置列（窄窗自适应）、状态栏收发速率统计、线路信号（DCD/DSR/CTS/RI/ERR/BREAK）
-- **小工具**：转换计算器（DEC/HEX/BIN/ASCII/float 大小端）、ASCII 码表、设备管理器入口
-
-## 下载与运行
-
-到 [Releases](../../releases) 下载，或用仓库内构建脚本自行打包：
-
-| 产物 | 说明 |
-|---|---|
-| `PyCom.exe`（单文件版，约 24MB） | 拷到任意位置直接运行，启动需先解包、稍慢 |
-| `PyCom/`（目录版） | `PyCom.exe` 需与 `_internal/` 文件夹一起拷贝，启动快 |
-
-运行要求：Windows 10 及以上（x64），无需安装 Python 或其他运行库。
-
-配置文件 `pycom.json`、接收日志、导出文件均生成在 exe 同目录。
-
-## 从源码运行
-
-```bash
-pip install PySide6
-python main.py
-```
-
-依赖只有一个：`PySide6`（Qt6 官方 Python 绑定，串口走 QtSerialPort，不需要 pyserial）。
-
-## 打包
-
-```bat
-tools\build_exe.bat
-```
-
-需要 Python 3.13 + `pip install pyinstaller`。脚本按 `PyCom.spec` 一次产出目录版与单文件版；spec 内置体积裁剪（剔除未使用的 Qt QML/Quick/Pdf/OpenGL 软件回退/虚拟键盘/翻译等组件，共约减 60%）。
-
-## 开发与测试
-
-```bash
-pip install pytest
-python -m pytest tests/ -q        # 89 项单元/界面回归测试
-```
-
-测试覆盖校验算法、分包与持续流、行表裁剪、编码切分、终端仿真、发送队列、网络广播、配置防护、主题与状态栏等核心路径。
+`win32/` 是 `win64/` 的整树回迁副本 + 一层明确的 Qt5/32 位适配；功能只在
+win64 主线开发，win32 只同步修复（同步工具见下）。
 
 ## 目录结构
 
 ```
-├─ main.py            入口（主题/图标/配置装载）
-├─ app/
-│  ├─ core/           纯逻辑与连接层（可单测）：环形缓冲、行格式化、
-│  │                  校验、HEX、串口/网络链路、多条发送、发送文件、终端、配置
-│  ├─ ui/             界面层：主窗口、自绘接收视图、查找条、计算器、主题
-│  └─ version.py      版本号（单一来源）
-├─ assets/            图标资源（svg 运行期渲染 + ico 打包图标）
-├─ tests/             pytest 回归测试
-├─ tools/             打包脚本、图标生成
-└─ PyCom.spec         PyInstaller 打包配置（含体积裁剪清单）
+Develop/
+├─ readme.md            本文件（总入口）
+├─ CHANGELOG.md         全项目更新日志（汇总两分支；win64/、win32/ 内另有分支细目）
+├─ sync_check.py        win64 ↔ win32 同步核对工具（归一化 Qt5 适配，只报功能差异）
+├─ docs/                文档（按最新代码重写）
+│  ├─ 01-项目总览与功能规格.md     定位、双分支、原版 SSCOM 逆向规格基线、
+│  │                              PyCom 功能规格、对照矩阵、界面要点
+│  ├─ 02-架构与代码导读.md        模块职责、线程模型、性能路径、缓冲与行表
+│  │                              裁剪设计、改码前必读的坑清单、配置持久化
+│  ├─ 03-构建与打包.md            两分支环境/命令/产物；单文件版规则；spec
+│  │                              裁剪清单；UCRT 血统与产物审计
+│  ├─ 04-Win7-32位适配说明.md     回迁原因、代码变更清单、Qt5 运行期坑、
+│  │                              32 位内存边界与缓冲定档、sync_check 用法
+│  ├─ 05-测试与验收.md            测试跑法与覆盖面、产物审计、内存实测、
+│  │                              真机 Win7 验收清单与取证方法
+│  └─ 06-维护约定与已知限制.md    双分支维护约定、坑速查表、文件位置、
+│                                 已知限制、待办路线
+├─ win64/               PyCom 主线工程（源码 + 测试 + 打包配置）
+└─ win32/               PyCom32 回迁工程（多 vendor/ucrt-x86、审计与内存工具）
 ```
 
-架构约定：逻辑与界面分层，`app/core/` 不依赖 Qt 界面；所有连接类走主线程信号槽，不开线程；接收路径为「原始字节 → 环形缓冲 → 增量行格式化 → 只绘制可视区（30fps 合并刷新）」，128MB 缓冲不卡界面。
+每个工程目录内的 `README.md` 是该分支速览（运行/打包/验证）。
 
-## 许可证
+## 快速开始
 
-[MIT License](LICENSE) · Copyright © 2026 CoderNotCutie
+```bash
+# —— win64（PyCom，需 Python 3.13）——
+cd win64
+pip install -r requirements.txt     # 已锁版本（应用依赖只有 PySide6）
+python main.py                      # 源码运行
+python -m pytest tests/             # 99 项单测
+tools\build_exe.bat                 # 打包 → dist\PyCom.exe（单文件，≈24MB）
+
+# —— win32（PyCom32，需 32 位 Python 3.8.10 @ D:\Program Files\Python38-x32）——
+cd win32
+"D:\Program Files\Python38-x32\python.exe" -m pip install -r requirements.txt
+"D:\Program Files\Python38-x32\python.exe" main.py
+"D:\Program Files\Python38-x32\python.exe" -m pytest tests/     # 106 项单测
+tools\build_exe.bat                 # 打包 → dist\PyCom32.exe（单文件，≈20MB，Win7 可用）
+```
+
+打包共同规则：**只出单文件版**（拷单个 exe 即可运行），打包前退出正在运行的
+程序；win32 打包后必跑 `python tools\audit_dist_win7.py` 与
+`python tools\audit_dist_win7.py vendor\ucrt-x86` 两条审计（期望“未发现
+Win7 兼容性风险项”）。详见 [docs/03-构建与打包.md](docs/03-构建与打包.md)。
+
+> 本目录以源码工程为本体；`win32/dist/PyCom32.exe` 是最近一次构建的交付物
+> （重新打包覆盖生成）。`build/`、`__pycache__`、运行期 `pycom*.json`、
+> `PyCom-Log-*.txt`、`.mimosa/` 均为生成物，发布/备份时排除，可随时删除；
+> 按上面命令可一键重新构建。
+
+## 文档索引
+
+| 想做什么 | 看哪篇 |
+|---|---|
+| 了解项目定位、功能清单、与原版 SSCOM 的对照 | [01-项目总览与功能规格](docs/01-项目总览与功能规格.md) |
+| 读代码、加功能、查设计坑 | [02-架构与代码导读](docs/02-架构与代码导读.md) |
+| 源码运行 / 跑测试 / 打包出 exe | [03-构建与打包](docs/03-构建与打包.md) |
+| 维护 Win7/32 位分支、了解 Qt5 适配与内存边界 | [04-Win7-32位适配说明](docs/04-Win7-32位适配说明.md) |
+| 验证产物（审计/内存/真机 Win7 验收） | [05-测试与验收](docs/05-测试与验收.md) |
+| 日常维护规则、已知限制、待办 | [06-维护约定与已知限制](docs/06-维护约定与已知限制.md) |
+| 版本历史 / 变更日志 | [CHANGELOG.md](CHANGELOG.md)（总览；各工程目录内有分支细目） |
+
+## 同步维护（win64 → win32）
+
+主线改完代码先跑根目录 `python sync_check.py`（`-q` 看摘要）：它把 Qt5 适配
+改写（PySide6→PySide2、exec→exec_、Qt6 完全限定枚举等）与注释归一化掉，
+只报**真正需要手工移植的功能差异**。移植时按
+[docs/04-Win7-32位适配说明.md](docs/04-Win7-32位适配说明.md) 的规则改写，
+移植完重跑确认收敛；当前 8 个文件存在有意差异（缓冲档位、terminal 转义、
+Qt5 菜单适配等），属正常，勿“修平”。`python sync_check.py --testcount`
+另行核对两分支 CHANGELOG（最新一节）/readme/docs 里的测试条数陈述与
+pytest 实收是否一致——改测试忘改文档的条数漂移在此兜底（审查复发问题，
+机制化消除）。
+
+## 当前状态（2026-10-16）
+
+- 两分支均为 V0.0.2；测试 win64 99 项 / win32 106 项全过（当日实跑）；
+- win64：功能完整（ISP 烧写器×2 与示波器除外），产物 `PyCom.exe` 验证可用；
+- win32：**✅ Win7 32/64 位真机验收全部通过**（2026-10-16~17，期间真机发现
+  的问题均已修复并复验）；单测 / PE 审计 / UCRT 血统 / 32 位内存实测全绿；
+- 已知限制与完整待办清单见 [docs/06-维护约定与已知限制.md](docs/06-维护约定与已知限制.md)。
