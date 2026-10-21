@@ -6,7 +6,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from PySide2.QtCore import Qt
+from PySide2.QtCore import QPoint, Qt
 from PySide2.QtTest import QTest
 from PySide2.QtWidgets import QApplication
 
@@ -15,6 +15,28 @@ from app.core.txfile import FileSender
 from app.ui.mainwindow import MainWindow
 
 app = QApplication.instance() or QApplication([])
+
+
+class _ClipStub:
+    """系统剪贴板桩：真实剪贴板可能被其他进程长期占用（Qt OpenClipboard
+    持续失败，2026-10-19 实测），剪贴断言一律走桩保证确定性。"""
+
+    def __init__(self):
+        self._text = ""
+
+    def setText(self, t):
+        self._text = t
+
+    def text(self):
+        return self._text
+
+
+class _QAppStub:
+    def __init__(self, clip):
+        self._clip = clip
+
+    def clipboard(self):
+        return self._clip
 
 # PySide2 的 QtTest 没有 qWait 静态方法（PySide6 才有），用事件循环轮询等价替代
 if not hasattr(QTest, "qWait"):
@@ -244,9 +266,12 @@ def test_multisend_loop_order_skips_zero():
     loop = MultiSendLoop(lambda: rows)
     loop.send_row.connect(lambda r: sent.append(r["note"]))
     assert loop.start_loop() is True     # 有 order>0 条目才启动
-    QTest.qWait(40)
+    for _ in range(200):                 # 等前两发到达（5ms/条），1s 上限防负载抖动
+        QTest.qWait(10)
+        if len(sent) >= 2:
+            break
     loop.stop()
-    assert sent[0] == "c"                # 顺序号 1 最先
+    assert len(sent) >= 2 and sent[0] == "c"   # 顺序号 1 最先
     assert "b" not in sent               # 顺序号 0 跳过
     assert set(sent) == {"c", "a"}
 
@@ -564,7 +589,7 @@ def test_ini_import_replaces_rows_and_clamps(tmp_path):
                               "order": 1, "interval": 1}]
     s.import_original_ini(str(ini))
     assert s.d["multisend_rows"] == []      # INI 无多条 → 清空旧行（导入即替换）
-    assert s.d["buffer_cap"] == 20 * 1024 * 1024   # 超大缓冲钳到上界（20MB，32 位）
+    assert s.d["buffer_cap"] == 50 * 1024 * 1024   # 超大缓冲钳到上界（50MB，32 位）
     assert s.d["remote_port"] == 65535
     assert s.d["win_w"] == 20000 and s.d["win_h"] == 20000
 
@@ -1153,7 +1178,10 @@ def test_term_input_real_click_focus(tmp_path):
     QTest.mouseClick(vp, Qt.LeftButton, Qt.NoModifier, vp.rect().center())
     for _ in range(3):
         app.processEvents()
-    fw = app.focusWidget()
+    # 用窗口内焦点而非 app.focusWidget()：桌面被其他程序占前台时 show() 不保证
+    # 激活窗口（全局焦点会是 None），而"点击 viewport 后窗口内焦点落在哪"才是
+    # 本测试的回归点（终端输入对两个焦点目标都必须可用）
+    fw = win.focusWidget()
     # Qt 把点击 viewport 的焦点交给外框 RxView，真实按键只会投递到焦点控件；
     # 无论焦点在外框还是 viewport，终端输入都必须可用（缺陷回归点）
     assert fw in (win.rxview, vp), type(fw).__name__
@@ -1353,22 +1381,26 @@ def test_ms_row_button_order(tmp_path):
                      win.btn_ms_help, win.btn_ms_import]
 
 
-# ---- 显示缓冲上限：删 1G、加 256M、最大 512M（配置超限自动收敛）----
-def test_buffer_sizes_capped_20m_for_32bit(tmp_path):
-    """32 位分支：菜单上限 20M、默认 5M（需求 2026-10-16）；两层都收敛——
-    settings 归一化与开窗时的 _clamp_cap（实测见 tools/mem_probe.py）。
+# ---- 显示缓冲上限：默认 5M、上限 50M（2026-10-20 放宽；配置超限自动收敛）----
+def test_buffer_sizes_capped_50m_for_32bit(tmp_path):
+    """32 位分支：菜单上限 50M（原 20M，2026-10-20 用户要求放宽）、默认 5M；
+    两层都收敛——settings 归一化与开窗时的 _clamp_cap（实测见 tools/mem_probe.py）。
     注：该上限只管原始字节（*.bin 导出量/内存）；接收区回看深度由行表 50 万行决定。"""
-    from app.core.settings import BUF_CAP_DEFAULT, BUF_CAP_MAX
+    from app.core.settings import BUF_CAP_DEFAULT, BUF_CAP_MAX, BUF_CAP_MIN
     from app.ui.mainwindow import BUF_SIZES, _MAX_BUF
     names = [n for n, _ in BUF_SIZES]
-    assert "20M" in names and "50M" not in names and "128M" not in names
-    assert max(s for _, s in BUF_SIZES) == _MAX_BUF == BUF_CAP_MAX == 20_971_520
+    assert "50M" in names and "200K" not in names and "128M" not in names
+    assert max(s for _, s in BUF_SIZES) == _MAX_BUF == BUF_CAP_MAX == 52_428_800
+    assert min(s for _, s in BUF_SIZES) == BUF_CAP_MIN == 500_000
     assert Settings(str(tmp_path / "fresh.json")).d["buffer_cap"] == BUF_CAP_DEFAULT
     assert BUF_CAP_DEFAULT == 5_242_880 and "5M" in names   # 默认值正好是菜单里的 5M 档
     p = tmp_path / "big.json"
     p.write_text('{"buffer_cap": 1073741824}', encoding="utf-8")
     s = Settings(str(p))
     assert s.d["buffer_cap"] == BUF_CAP_MAX      # settings 层就钳到上界
+    p2 = tmp_path / "tiny.json"
+    p2.write_text('{"buffer_cap": 200000}', encoding="utf-8")
+    assert Settings(str(p2)).d["buffer_cap"] == BUF_CAP_MIN   # 删除的 200K 档收敛到 500K
     win = MainWindow(s)                          # 开窗再兜一层，菜单勾选态同步
     assert win.cfg.d["buffer_cap"] == _MAX_BUF
     assert win.buf.cap == _MAX_BUF
@@ -1381,8 +1413,8 @@ def test_rx_oom_degrades_gracefully(tmp_path, monkeypatch):
     win.show()
     for _ in range(3):
         app.processEvents()
-    win._set_buffer_cap(268_435_456)                 # 超上限的请求被钳到 20M 档
-    assert win.buf.cap == 20_971_520
+    win._set_buffer_cap(268_435_456)                 # 超上限的请求被钳到 50M 档
+    assert win.buf.cap == 52_428_800
     fail = {"n": 1}
     real_append = win.buf.append
 
@@ -1394,12 +1426,12 @@ def test_rx_oom_degrades_gracefully(tmp_path, monkeypatch):
 
     monkeypatch.setattr(win.buf, "append", maybe_fail)
     win._on_rx(b"AAAA")                              # 首次失败 → 降档重试成功
-    assert win.buf.cap == 10_485_760                 # 20M 减半
-    assert win.cfg.d["buffer_cap"] == 10_485_760
+    assert win.buf.cap == 26_214_400                 # 50M 减半
+    assert win.cfg.d["buffer_cap"] == 26_214_400
     assert b"AAAA" in win.buf.read(win.buf.start_abs, 64)
     fail["n"] = 99                                   # 之后一律失败 → 丢包不崩
     win._on_rx(b"BBBB")
-    assert win.buf.cap == 5_242_880                  # 再降一档
+    assert win.buf.cap == 13_107_200                  # 再降一档
     assert b"BBBB" not in win.buf.read(win.buf.start_abs, 64)
     assert "内存不足" in win.sb_link.text()   # OOM 提示走第4框临时通知
 
@@ -1411,7 +1443,7 @@ def test_rx_oom_feed_failure_no_double_append(tmp_path, monkeypatch):
     win.show()
     for _ in range(3):
         app.processEvents()
-    win._set_buffer_cap(20_971_520)
+    win._set_buffer_cap(52_428_800)
     fail = {"n": 1}
     real_feed = win.builder.feed
 
@@ -1423,7 +1455,7 @@ def test_rx_oom_feed_failure_no_double_append(tmp_path, monkeypatch):
 
     monkeypatch.setattr(win.builder, "feed", maybe_fail)
     win._on_rx(b"ZZZZZZZZ")                  # append 成功、feed 失败 → 降档重试
-    assert win.buf.cap == 10_485_760         # 20M 减半
+    assert win.buf.cap == 26_214_400         # 50M 减半
     assert win.buf.read(win.buf.start_abs, 64) == b"ZZZZZZZZ"   # 只有一份
     assert win.rx_bytes == 8                 # 字节在缓冲里：计数一致（审查 N3）
 
@@ -1711,15 +1743,538 @@ def test_link_pending_cancel_button(tmp_path):
     assert win.btn_link.text() == "打开串口"
 
 
+# ---- 接收区鼠标选择复制：选区文本 / 坐标映射 / 复制所选 ----
+def test_rxview_selection_copy(tmp_path, monkeypatch):
+    win = MainWindow(Settings(str(tmp_path / "sel.json")))
+    win._on_rx(b"ABCDEFGH\r\n")
+    win._on_rx(b"0123456789\r\n")
+    win.builder.split = False   # 关闭时间戳分包：正文顶格，选区映射基准 base=4
+    win.builder.flush()
+    v = win.rxview
+    v.resize(400, 240)
+    v.viewport().setGeometry(0, 0, 392, 236)   # 未进事件循环，视口几何手动给足
+    v.verticalScrollBar().setValue(v.builder.base)
+    # 选区文本：跨行 (0,2)→(1,3)，按逻辑行拼接
+    v._sel_anchor = (0, 2)
+    v._sel_focus = (1, 3)
+    assert v.has_selection() and v._selected_text() == "CDEFGH\n012"
+    from app.ui import rxview as rxview_mod
+    clip = _ClipStub()
+    monkeypatch.setattr(rxview_mod, "QApplication", _QAppStub(clip))
+    v.copy_selection()
+    assert clip.text() == "CDEFGH\n012"
+    # 坐标映射：与绘制同源的等宽字格——行 0 第 c 列字符中心 → (0, c)
+    vp = v.viewport()
+    lh = v._line_h()
+    top = v.verticalScrollBar().value()
+    cw = max(1, v._fms["rx"].horizontalAdvance("M"))
+    y0 = vp.rect().top() + 2 + (0 - top) * lh + lh // 2
+    assert v._pos_to_point(QPoint(4 + cw // 2, y0)) == (0, 0)
+    assert v._pos_to_point(QPoint(4 + cw * 5 + cw // 2, y0)) == (0, 5)
+    # 清空显示 → 选区复位
+    v.clear_all()
+    assert not v.has_selection() and v._selected_text() == ""
+
+
+# ---- 选区拖拽边缘自动滚屏：可跨屏选择屏幕外内容 ----
+def test_rxview_selection_autoscroll(tmp_path):
+    win = MainWindow(Settings(str(tmp_path / "autoscroll.json")))
+    for i in range(30):
+        win._on_rx(b"LINE%02d\r\n" % i)
+    win.builder.flush()
+    v = win.rxview
+    v.resize(400, 240)
+    v.viewport().setGeometry(0, 0, 392, 236)
+    v._update_range()   # 滚动条范围需按行数初始化（测试无 _tick/resize）
+    v.verticalScrollBar().setValue(10)
+    v._selecting = True
+    v._sel_anchor = (10, 0)
+    v._sel_focus = (10, 2)
+    # 光标在顶边内侧 → 自动向上滚，焦点行号前移
+    v._sel_cursor_x = 100
+    v._sel_cursor_y = v.viewport().rect().top() + 4
+    v._sel_autoscroll()
+    assert v.verticalScrollBar().value() < 10
+    assert v._sel_focus[0] < 10
+    # 光标移到底边内侧 → 自动向下滚（回拨时钟模拟 50ms 间隔）
+    import time as _time
+    v._autosel_t = _time.perf_counter() - 0.05
+    up_val = v.verticalScrollBar().value()
+    v._sel_cursor_y = v.viewport().rect().bottom() - 2
+    v._sel_autoscroll()
+    assert v.verticalScrollBar().value() > up_val
+
+
+# ---- 折行行的命中映射（十四轮 X1）：列含折行段偏移、行号按实际视觉行回推 ----
+def test_rxview_selection_wrapped_mapping(tmp_path):
+    win = MainWindow(Settings(str(tmp_path / "wrap.json")))
+    v = win.rxview
+    v.resize(400, 240)
+    v.viewport().setGeometry(0, 0, 392, 236)
+    cw = max(1, v._fms["rx"].horizontalAdvance("M"))
+    cols = max(8, (392 - 8) // cw)
+    text = "A" * cols + "DEF" + "Z" * (200 - cols - 3)     # 200 字符：第 2 视觉行以 DEF 开头
+    win._on_rx((text + "\r\n").encode("gbk"))              # 行须收尾，否则下包续接同行
+    win.builder.flush()
+    win._on_rx(b"BBB\r\n")
+    win.builder.flush()
+    v._update_range()
+    v.verticalScrollBar().setValue(v.builder.base)
+    lh = v._line_h()
+    y0 = v.viewport().rect().top() + 2
+    n_rows = (len(text) + cols - 1) // cols
+    # 第二视觉行首字符（'D'）：旧实现返回 (0,0)（映射到 'A'）
+    assert v._pos_to_point(QPoint(4 + cw // 2, y0 + lh + lh // 2)) == (0, cols)
+    # 从 'D' 拖选 3 字符：复制恰好是 DEF（s=cols≠0，不带行首注记）
+    v._sel_anchor, v._sel_focus = (0, cols), (0, cols + 3)
+    assert v._selected_text() == "DEF"
+    # 长行占 n_rows 个视觉行，其后 BBB 回推到逻辑行 1（旧实现按 (i-top)*lh 串行错位）
+    y_bbb = y0 + n_rows * lh + lh // 2
+    assert v._pos_to_point(QPoint(6, y_bbb)) == (1, 0)
+    # 长行首行（r=0）仍按注记区偏移映射：正文第 1 列的 x → 列 1
+    fm = v._fms["rx"]
+    la = win.builder.line_at(0)
+    base_x = 4 + fm.horizontalAdvance(la.prefix) + fm.horizontalAdvance("收←◆")
+    assert v._pos_to_point(QPoint(base_x + cw + cw // 2, y0 + lh // 2)) == (0, 1)
+
+# ---- 转换计算器：HEX 小端/大端字节序互转 ----
+def test_calculator_endian(tmp_path):
+    from app.ui.calculator_dlg import CalculatorWidget
+    w = CalculatorWidget()
+    # 数值驱动：0x12345678 → BE 自然序 / LE 逆序
+    w._recompute(w._from_hex, "十六进制 HEX", "12345678")
+    assert w.fields["HEX 大端 BE"].text() == "12 34 56 78"
+    assert w.fields["HEX 小端 LE"].text() == "78 56 34 12"
+    # 小端字段输入反推数值
+    w._recompute(w._from_hexle, "HEX 小端 LE", "78 56 34 12")
+    assert w.fields["十六进制 HEX"].text() == "12345678"
+    # 大端字段输入反推数值
+    w._recompute(w._from_hexbe, "HEX 大端 BE", "12 34 56 78")
+    assert w.fields["HEX 小端 LE"].text() == "78 56 34 12"
+    # 单字节与 0 值
+    w._recompute(w._from_dec, "十进制 DEC", "0")
+    assert w.fields["HEX 小端 LE"].text() == "00"
+    w._recompute(w._from_dec, "十进制 DEC", "255")
+    assert w.fields["HEX 小端 LE"].text() == "FF"
+    assert w.fields["HEX 大端 BE"].text() == "FF"
+
+
+# ---- 复制/保存含时间戳和收发标记：选区/全部文本/保存文件（与显示设置独立）----
+def _feed_two_packets(win):
+    """灌入两个独立收包（各带时间戳前缀），返回两行。"""
+    win._on_rx(b"AAAA\r\n")
+    win.builder.flush()                     # 包 1
+    win._on_rx(b"BBBB\r\n")
+    win.builder.flush()                     # 包 2
+    return win.builder.visible()
+
+
+def test_rxview_copy_anno_selection_and_all(tmp_path, monkeypatch):
+    from app.core.display import dir_marker
+    win = MainWindow(Settings(str(tmp_path / "anno.json")))
+    la, lb = _feed_two_packets(win)
+    v = win.rxview
+    assert v.copy_with_anno and v.save_with_anno      # 默认含（与显示默认一致）
+    # 关闭显示分包：显示层不带注记，复制选项仍能带出（选项与显示独立）
+    win.builder.split = False
+    assert v.plain_text() == "AAAA\nBBBB"
+    assert v.plain_text(False) == "AAAA\nBBBB"
+    with_anno = v.plain_text(True)
+    assert with_anno == (la.prefix + dir_marker("rx") + "AAAA\n"
+                         + lb.prefix + dir_marker("rx") + "BBBB")
+    # 选区复制：全行选中 → 行首注记随行带出
+    v.resize(400, 240)
+    v.viewport().setGeometry(0, 0, 392, 236)
+    v._sel_anchor, v._sel_focus = (0, 0), (1, 4)
+    assert v._selected_text() == with_anno
+    from app.ui import rxview as rxview_mod
+    clip = _ClipStub()
+    monkeypatch.setattr(rxview_mod, "QApplication", _QAppStub(clip))
+    v.copy_selection()
+    assert clip.text() == with_anno
+    # 半途起选（列 > 0）的行不带注记——用户没选到行首
+    v._sel_anchor = (0, 2)
+    assert v._selected_text() == ("AA\n" + lb.prefix + dir_marker("rx") + "BBBB")
+    # 关闭复制选项：纯正文（与显示开关无关）
+    v.copy_with_anno = False
+    v._sel_anchor = (0, 0)
+    assert v._selected_text() == "AAAA\nBBBB"
+
+
+def test_save_rx_text_respects_save_anno(tmp_path):
+    win = MainWindow(Settings(str(tmp_path / "save_anno.json")))
+    _feed_two_packets(win)
+    out = tmp_path / "out.txt"
+    win._save_rx(str(out))                              # 默认含注记
+    data = out.read_text(encoding="gbk")
+    assert "收←◆AAAA" in data and data.startswith("[")
+    win.rxview.save_with_anno = False                   # 关闭后：纯正文
+    win._save_rx(str(out))
+    assert out.read_text(encoding="gbk") == "AAAA\nBBBB"
+
+
+def test_rxview_menu_toggles_anno(tmp_path):
+    """右键菜单两项：点击切换开关，勾选态 = 行尾 ●（同主窗口菜单约定）。"""
+    win = MainWindow(Settings(str(tmp_path / "menu_anno.json")))
+    v = win.rxview
+    texts = [a.text() for a in v._build_menu().actions()]
+    # 默认勾选：两项行尾带 ●
+    assert "复制含时间戳和收发标记\t\u3000●" in texts
+    assert "保存含时间戳和收发标记\t\u3000●" in texts
+    v._menu_action(v._act_canno)               # 点击"复制"项 → 关闭
+    assert not v.copy_with_anno and v.save_with_anno
+    texts = [a.text() for a in v._build_menu().actions()]
+    assert "复制含时间戳和收发标记" in texts and \
+        "复制含时间戳和收发标记\t\u3000●" not in texts
+    v._menu_action(v._act_canno)               # 再点 → 重新打开
+    assert v.copy_with_anno
+    texts = [a.text() for a in v._build_menu().actions()]
+    assert "复制含时间戳和收发标记\t\u3000●" in texts
+    # 保存项独立切换；菜单取消（None）不改状态
+    v._menu_action(v._act_sanno)
+    assert not v.save_with_anno and v.copy_with_anno
+    v._menu_action(None)
+    assert not v.save_with_anno
+
+
+def test_anno_settings_roundtrip(tmp_path):
+    p = tmp_path / "anno_cfg.json"
+    win = MainWindow(Settings(str(p)))
+    assert win.rxview.copy_with_anno is True and win.rxview.save_with_anno is True
+    win.rxview.copy_with_anno = False
+    win._save_settings(silent=True)
+    s2 = Settings(str(p))
+    assert s2.d["copy_with_anno"] is False and s2.d["save_with_anno"] is True
+    win2 = MainWindow(s2)
+    assert win2.rxview.copy_with_anno is False and win2.rxview.save_with_anno is True
+
+
+# ---- 网络 IPv6：纯单栈语义（绑哪个族只收发哪个族）+ 远程写法宽容 ----
+def test_tcp_v6_loopback_and_v4_isolation(tmp_path):
+    """服务端绑 ::1：IPv6 客户端互通；IPv4 客户端必须连不上（单栈）。"""
+    from PySide2.QtNetwork import QTcpSocket, QHostAddress, QAbstractSocket
+    from app.core.net_link import TcpServerLink
+    win = MainWindow(Settings(str(tmp_path / "v6tcp.json")))
+    link = TcpServerLink({"local_ip": "::1", "local_port": 0})
+    got = bytearray()
+    link.rx.connect(got.extend)
+    assert link.open()
+    port = link.srv.serverPort()
+    c6 = QTcpSocket()
+    c6.connectToHost(QHostAddress("::1"), port)
+    for _ in range(30):
+        app.processEvents()
+        if link.clients:
+            break
+    assert link.clients, "IPv6 客户端应能连上 ::1 服务端"
+    c6.write(b"ping6")
+    for _ in range(30):
+        app.processEvents()
+        if got:
+            break
+    assert bytes(got) == b"ping6"
+    c4 = QTcpSocket()
+    c4.connectToHost(QHostAddress("127.0.0.1"), port)
+    for _ in range(30):
+        app.processEvents()
+        if c4.state() == QAbstractSocket.UnconnectedState:
+            break
+    assert c4.state() != QAbstractSocket.ConnectedState, \
+        "绑 ::1 后 IPv4 客户端不允许连上（单栈语义，探针回归）"
+    link.close()
+    c6.abort()
+    c4.abort()
+
+
+# ---- TCP 客户端"本机 IP"真实生效：连接前预绑定（十九轮 F1，历史遗留）----
+def test_tcp_client_binds_local_ip(tmp_path):
+    """TcpClientLink 此前从不绑定 local_ip，"本机 IP"下拉形同虚设（UI 可选、
+    describe() 照显示、文档称三模式共用）。现在 open() 前按所选地址预绑定：
+    具体地址=限定源地址；0.0.0.0 / ::=限定协议族（与其余两模式同语义）；
+    绑定不可能的地址（本机未配置）→ 立即报"绑定失败"，不再假装生效。"""
+    from app.core.net_link import TcpClientLink, TcpServerLink
+    srv = TcpServerLink({"local_ip": "127.0.0.1", "local_port": 0})
+    assert srv.open()
+    port = srv.srv.serverPort()
+    got = bytearray()
+    srv.rx.connect(got.extend)
+    c = TcpClientLink({"remote_ip": "127.0.0.1", "remote_port": str(port),
+                       "local_ip": "127.0.0.1"})
+    assert c.open() is False                     # 异步连接
+    for _ in range(100):
+        app.processEvents()
+        if c.is_open():
+            break
+    assert c.is_open(), "源地址 127.0.0.1 应能连上本机服务端"
+    c.write(b"hi")
+    for _ in range(50):
+        app.processEvents()
+        if got:
+            break
+    assert bytes(got) == b"hi", "绑定后应真实互通"
+    c.close()
+    srv.close()
+
+    # 本机未配置的地址 → bind 立即失败并报错（此前被静默忽略、照样连上）
+    c2 = TcpClientLink({"remote_ip": "127.0.0.1", "remote_port": str(port),
+                        "local_ip": "198.51.100.7"})       # TEST-NET-2，不可绑定
+    states = []
+    c2.state_changed.connect(states.append)
+    c2.open()
+    for _ in range(50):
+        app.processEvents()
+        if any(s.startswith("error") for s in states):
+            break
+    assert not c2.is_open()
+    assert any("绑定失败" in s for s in states), states
+
+    # 单栈一致性：绑 0.0.0.0（仅 IPv4）时 IPv6 远程连不上；绑 :: 才能连上
+    from PySide2.QtNetwork import QAbstractSocket
+    srv6 = TcpServerLink({"local_ip": "::1", "local_port": 0})
+    assert srv6.open()
+    port6 = srv6.srv.serverPort()
+    c4 = TcpClientLink({"remote_ip": "::1", "remote_port": str(port6),
+                        "local_ip": "0.0.0.0"})
+    c4.open()
+    for _ in range(50):
+        app.processEvents()
+        if c4.sock.state() == QAbstractSocket.UnconnectedState:
+            break
+    assert not c4.is_open(), "绑 IPv4 全部地址不允许连上 IPv6 服务端（单栈）"
+    c6 = TcpClientLink({"remote_ip": "::1", "remote_port": str(port6),
+                        "local_ip": "::"})
+    c6.open()
+    for _ in range(100):
+        app.processEvents()
+        if c6.is_open():
+            break
+    assert c6.is_open(), "绑 :: 应能连上 IPv6 服务端"
+    c4.close()
+    c6.close()
+    srv6.close()
+
+
+def test_udp_v6_loopback_and_v4_isolation(tmp_path):
+    """UDP 绑 ::：IPv6 数据报双向可达；IPv4 数据报收不到。"""
+    from PySide2.QtNetwork import QUdpSocket, QHostAddress
+    from app.core.net_link import UdpLink
+    win = MainWindow(Settings(str(tmp_path / "v6udp.json")))
+    link = UdpLink({"local_ip": "::", "local_port": 0,
+                    "remote_ip": "::1", "remote_port": 9})
+    got = bytearray()
+    link.rx.connect(got.extend)
+    assert link.open()
+    port = link.sock.localPort()
+    peer = QUdpSocket()
+    peer.bind(QHostAddress("::1"), 0)
+    peer.writeDatagram(b"hi6", QHostAddress("::1"), port)
+    for _ in range(30):
+        app.processEvents()
+        if got:
+            break
+    assert bytes(got) == b"hi6"
+    peer.writeDatagram(b"hi4", QHostAddress("127.0.0.1"), port)
+    for _ in range(10):
+        app.processEvents()
+    assert bytes(got) == b"hi6", "IPv4 数据报不允许进入仅 IPv6 绑定（单栈语义）"
+    rx = QUdpSocket()
+    rx.bind(QHostAddress("::1"), 0)
+    link.cfg["remote_port"] = rx.localPort()
+    assert link.write(b"out6") == 4
+    for _ in range(30):
+        app.processEvents()
+        if rx.hasPendingDatagrams():
+            break
+    assert rx.hasPendingDatagrams() and bytes(rx.receiveDatagram().data()) == b"out6"
+    link.close()
+    peer.close()
+    rx.close()
+
+
+def test_udp_bad_remote_notice_once(tmp_path):
+    """远程 IP 无法解析：报一次 error；修正后恢复 open（定时发送不刷屏）。"""
+    from app.core.net_link import UdpLink
+    win = MainWindow(Settings(str(tmp_path / "udpbad.json")))
+    link = UdpLink({"local_ip": "127.0.0.1", "local_port": 0,
+                    "remote_ip": "not-an-ip", "remote_port": 9})
+    assert link.open()
+    states = []
+    link.state_changed.connect(states.append)
+    assert link.write(b"x") == 0
+    assert link.write(b"x") == 0
+    errs = [s for s in states if s.startswith("error:")]
+    assert len(errs) == 1 and "无法解析" in errs[0]
+    link.cfg["remote_ip"] = "127.0.0.1"
+    assert link.write(b"ok") == 2
+    assert states[-1] == "open"
+    link.close()
+
+
+def test_strip_brackets_and_client_v6_connect(tmp_path):
+    """[::1] 写法宽容 + TCP 客户端直连 ::1 服务端（连 v6 远程须绑 v6 本机
+    地址——本地下拉选 ::，单栈语义与十九轮 F1 预绑定一致）。"""
+    from PySide2.QtNetwork import QTcpServer, QHostAddress
+    from app.core.net_link import TcpClientLink, _strip_brackets
+    assert _strip_brackets("[::1]") == "::1"
+    assert _strip_brackets(" 127.0.0.1 ") == "127.0.0.1"
+    assert _strip_brackets("") == ""
+    srv = QTcpServer()
+    assert srv.listen(QHostAddress("::1"), 0)
+    win = MainWindow(Settings(str(tmp_path / "v6cli.json")))
+    link = TcpClientLink({"remote_ip": "[::1]", "remote_port": srv.serverPort(),
+                          "local_ip": "::"})
+    link.open()
+    for _ in range(30):
+        app.processEvents()
+        if link.is_open():
+            break
+    assert link.is_open(), "剥括号后应能连上 ::1"
+    link.close()
+    srv.close()
+
+
+def test_local_ip_combo_lists_v6(tmp_path):
+    """本地 IP 下拉：0.0.0.0 首项（仅 IPv4 全部），:: 在列（仅 IPv6 全部），
+    本机有 IPv6 地址时下拉里也应出现（全局在前链路本地在后）。"""
+    win = MainWindow(Settings(str(tmp_path / "nics.json")))
+    win._refresh_nics()
+    win.cmb_nic.setCurrentIndex(0)             # 切回"全部网卡"（默认可能自动选中环回网卡）
+    win._refresh_local_ips()
+    items = [win.cmb_local_ip.itemText(i) for i in range(win.cmb_local_ip.count())]
+    assert items[0] == "0.0.0.0"
+    assert "::" in items
+    from PySide2.QtNetwork import QNetworkInterface, QAbstractSocket
+    has_v6 = any(e.ip().protocol() == QAbstractSocket.IPv6Protocol
+                 for if_ in QNetworkInterface.allInterfaces()
+                 for e in if_.addressEntries())
+    if has_v6:
+        v6_items = [t for t in items if ":" in t]
+        assert v6_items and v6_items[0] == "::"
+        assert v6_items[-1].startswith("fe80")     # 链路本地排最后
+
+
+# ---- UDP 发送失败的状态呈现（十六轮 F2/F3）----
+def test_udp_send_fail_state_stays_bound(tmp_path):
+    """发送失败时链路仍绑定：界面保持 已连接/关闭（F2），不退化成 未连接/打开
+    （否则按钮写「打开」点击却执行关闭）；已断开的失败（绑定失败）维持原语义。"""
+    from app.core.net_link import UdpLink
+    win = MainWindow(Settings(str(tmp_path / "f2.json")))
+    win._set_mode("udp", quiet=True)
+    link = UdpLink({"local_ip": "127.0.0.1", "local_port": 0,
+                    "remote_ip": "127.0.0.1", "remote_port": 9})
+    assert link.open()
+    win.link = link
+    win._on_state("error: 远程IP无法解析(x)")
+    assert link.is_open()
+    assert win.sb_state.text() == "已连接"
+    assert win.btn_link.text() == "关闭"
+    win._on_state("open")                          # 恢复 → 正常
+    assert win.sb_state.text() == "已连接"
+    # 已断开的失败（如绑定失败，link 未打开）→ 维持 未连接/打开（W1 语义不回归）
+    link.close()
+    win._on_state("error: 绑定失败(x)")
+    assert win.sb_state.text() == "未连接"
+    assert win.btn_link.text() == "打开"
+
+
+def test_write_generic_notify_gated_by_link_error(tmp_path):
+    """链路已上报具体原因（远程IP无法解析）时，_write 不再叠加通用提示
+    覆盖第 4 格（F3）；通用提示对未上报原因的链路（如 TCP 积压）仍然生效。"""
+    from app.core.net_link import UdpLink
+    win = MainWindow(Settings(str(tmp_path / "f3.json")))
+    win._set_mode("udp", quiet=True)
+    link = UdpLink({"local_ip": "127.0.0.1", "local_port": 0,
+                    "remote_ip": "not-an-ip", "remote_port": 9})
+    assert link.open()
+    win.link = link
+    link.state_changed.connect(win._on_state)   # 正常打开路径由 _open_link 接线
+    win._write(b"abc")
+    assert "无法解析" in win.sb_link.text()
+    assert "写入失败或对端未就绪" not in win.sb_link.text()
+    # 修正地址：发送成功且无残留错误提示
+    link.cfg["remote_ip"] = "127.0.0.1"
+    win._write(b"abc")
+    for _ in range(5):
+        app.processEvents()
+    assert "无法解析" not in win.sb_link.text()
+
+
+# ---- 帮助 ▸ 检查更新：打开仓库 Releases 页（应用内不联网，十六轮后用户定稿）----
+def test_help_menu_check_update_opens_release_page(tmp_path, monkeypatch):
+    from app.ui import mainwindow as mw_mod
+    win = MainWindow(Settings(str(tmp_path / "upd.json")))
+
+    class _DS:
+        url = None
+
+        @staticmethod
+        def openUrl(u):
+            _DS.url = u
+            return True
+
+    monkeypatch.setattr(mw_mod, "QDesktopServices", _DS)
+    win.act_check_update.trigger()
+    assert _DS.url.toString() == "https://github.com/smartmx/PyCom/releases/latest"
+
+
+# ---- 网络模式锁死无关输入框（2026-10-20 用户定稿）----
+def test_net_mode_locks_irrelevant_inputs(tmp_path):
+    """TCP 客户端锁本机端口、TCP 服务器锁远程 IP/端口（置灰+悬停原因），
+    UDP 四项全有效；锁死只禁输入，值仍随配置持久化。"""
+    win = MainWindow(Settings(str(tmp_path / "lock.json")))
+    win._set_mode("tcp_client", quiet=True)
+    assert not win.edit_local_port.isEnabled()
+    assert "无需配置本机端口" in win.edit_local_port.toolTip()
+    assert win.edit_remote_ip.isEnabled() and win.edit_remote_port.isEnabled()
+    assert "IPv4/IPv6" in win.edit_remote_ip.toolTip()
+    win._set_mode("tcp_server", quiet=True)
+    assert not win.edit_remote_ip.isEnabled() and not win.edit_remote_port.isEnabled()
+    assert "无需配置远程IP和端口" in win.edit_remote_ip.toolTip()
+    assert "无需配置远程IP和端口" in win.edit_remote_port.toolTip()
+    assert win.edit_local_port.isEnabled()
+    win._set_mode("udp", quiet=True)
+    assert (win.edit_remote_ip.isEnabled() and win.edit_remote_port.isEnabled()
+            and win.edit_local_port.isEnabled())
+
+
+# ---- 对话框标题栏跟随深色（Qt5 无 setColorScheme：应用级单例过滤器 + DWM）----
+def test_dialog_titlebar_dark_filter(tmp_path, monkeypatch):
+    """单例过滤器把顶层对话框的 Show 转发给"当前"主窗口的 _dark_titlebar_widget；
+    非对话框对象 / 非 Show 事件不触发（DWM 调用本身在 offscreen 自动跳过）。
+    全局只装一个过滤器、经弱引用转发新窗口——若每窗口自装，QApplication 的
+    过滤器列表会强持每个窗口的 Python 包装，事件分派随窗口数 O(N²)
+    （2026-10-20 实测把全量跑拖慢 10 倍，故收口为单例）。"""
+    import weakref as _wr
+    from PySide2.QtCore import QEvent
+    from PySide2.QtGui import QShowEvent
+    from PySide2.QtWidgets import QApplication, QMessageBox
+    win = MainWindow(Settings(str(tmp_path / "dlgbar.json")))
+    app = QApplication.instance()
+    f = app._dlg_dark_filter
+    assert isinstance(f._win, _wr.ref) and f._win() is win   # 弱引用当前窗口
+    dlg = QMessageBox(QMessageBox.Information, "标题", "内容")   # 顶层对话框
+    called = []
+    monkeypatch.setattr(win, "_dark_titlebar_widget", lambda w: called.append(w))
+    f.eventFilter(dlg, QShowEvent())
+    assert called == [dlg]
+    f.eventFilter(win.rxview, QShowEvent())       # 非对话框对象：不触发
+    assert called == [dlg]
+    f.eventFilter(dlg, QEvent(QEvent.Close))      # 非 Show 事件：不触发
+    assert called == [dlg]
+    win2 = MainWindow(Settings(str(tmp_path / "dlgbar2.json")))
+    assert app._dlg_dark_filter is f              # 仍是同一个单例
+    assert f._win() is win2                       # 新窗口接管转发
+
+
 # ---- 行表跟随缓冲：界面路径（_on_rx 同步 + 运行中调档立即同步）----
 def test_rx_keeps_line_table_within_buffer_span(tmp_path):
     """接收区显示的行与 *.bin 可导出的字节保持同一段：缓冲丢掉的旧数据，
     对应的行随之裁掉；运行中把上限调小时立即同步——不再出现"屏幕有、导出没有"。
     裁剪粒度是**包**（同一包内所有行 start_abs 相同），故允许"一包之内"的误差。"""
     win = MainWindow(Settings(str(tmp_path / "trim_hook.json")))
-    win._set_buffer_cap(500_000)                 # 小上限，便于触发丢弃
+    win._set_buffer_cap(1_048_576)               # 小上限，便于触发丢弃
     unit = b"abcdefghij\r\n" * 1000              # 12KB/次
-    for _ in range(120):                         # ≈1.4MB ≫ 500KB
+    for _ in range(120):                         # ≈1.4MB > 1M
         win._on_rx(unit)
         win.builder.flush()                      # 每次一包（真实使用由空闲/tick 结算）
     assert win.buf.dropped > 0
@@ -1727,6 +2282,115 @@ def test_rx_keeps_line_table_within_buffer_span(tmp_path):
     # 最旧的一包必须与缓冲保留范围相交（误差 ≤ 一包 = 12KB）
     assert win.builder.lines[0].start_abs >= win.buf.start_abs - 2 * len(unit)
     n_before = len(win.builder.lines)
-    win._set_buffer_cap(200_000)                 # 调小 → 缓冲丢更多，行表同步
+    win._set_buffer_cap(500_000)                 # 调小 → 缓冲丢更多，行表同步
     assert len(win.builder.lines) < n_before
     assert win.builder.lines[0].start_abs >= win.buf.start_abs - 2 * len(unit)
+
+
+# ---- 自动滚屏：用户回看自动取消勾选；重新勾选立即跳底（2026-10-20 用户定稿）----
+def test_rxview_scroll_pause_resume_near_bottom(tmp_path):
+    """滚轮上翻/拖拽选择/拖动滚动条 = 回看 → 主窗口自动取消"自动滚屏"勾选
+    （视图停住，持续接收下可安心选择复制）；重新勾选由 set_auto_scroll(True)
+    立即跳回最底部，不需要等新数据到达。"""
+    win = MainWindow(Settings(str(tmp_path / "scrl.json")))
+    v = win.rxview
+    v.resize(400, 240)
+    for i in range(200):
+        win._on_rx(b"LINE-%03d\r\n" % i)
+        win.builder.flush()
+    v._update_range()
+    sb = v.verticalScrollBar()
+    assert win.cb_auto_scroll.isChecked() and v._stick   # 默认勾选并跟随
+    # 用户回看（暂停请求：滚轮上翻/拖选/拖滚动条三个触发点共用）→ 勾选自动取消
+    v._pause_auto_scroll()
+    assert not win.cb_auto_scroll.isChecked()            # 勾选自动取消
+    assert not v._stick
+    pos = sb.value()
+    win._on_rx(b"MORE\r\n" * 60)                         # 持续接收
+    win.builder.flush()
+    v._update_range()
+    for _ in range(5):
+        app.processEvents()
+    assert sb.value() == pos                             # 视图停住不再跟随
+    # 再次勾选 → 立即跳到最底部（无新数据也生效）
+    win.cb_auto_scroll.setChecked(True)
+    assert v._stick
+    assert sb.value() == sb.maximum()
+    # 拖动滚动条：松手时不在底部 → 勾选自动取消；松手在底部 → 保持勾选
+    # （与"勾选=跟随状态"一致，方向无关，十九轮 F2）
+    sb.setValue(sb.maximum() - 10)
+    v._on_slider_released()
+    assert not win.cb_auto_scroll.isChecked()
+    win.cb_auto_scroll.setChecked(True)
+    sb.setValue(sb.maximum())
+    v._on_slider_released()
+    assert win.cb_auto_scroll.isChecked()
+
+
+# ---- 定时发送最小间隔 10ms → 1ms（2026-10-20 用户要求）----
+def test_timed_send_min_interval_1ms(tmp_path):
+    win = MainWindow(Settings(str(tmp_path / "tmin.json")))
+    assert win.sp_timed.minimum() == 1
+    assert win.sp_timed.maximum() == 3_600_000
+
+
+# ---- 状态栏速率：250ms 渲染 + 1s 滑窗，突发不再一拍归零（2026-10-20 用户反馈）----
+def test_speed_rate_rolling_window(tmp_path):
+    """旧实现两个毛病：①收/发路径直接写"RX: 总量"把速率后缀抹掉；②每秒清零
+    累计器导致速率只在突发后 1 秒内可见。现在收发只累计数，速率/总量统一由
+    _update_speed 渲染（取最近 1 秒滑窗，now 注入时钟驱动）。"""
+    win = MainWindow(Settings(str(tmp_path / "speed.json")))
+    win._update_speed(now=0.0)                    # 首拍只建样本，不出速率
+    win.tx_bytes += 1000
+    win.rx_bytes += 8000
+    win._update_speed(now=1.0)                    # 1 秒窗口
+    assert "TX: 1000 (1000 B/s)" == win.sb_tx.text()
+    assert "RX: 8000 (8000 B/s)" == win.sb_rx.text()
+    win._update_speed(now=1.25)                   # 无新数据：突发仍保持（滑窗未滑出）
+    assert win.sb_tx.text() == "TX: 1000 (800 B/s)"
+    assert win.sb_rx.text() == "RX: 8000 (6400 B/s)"
+    win._update_speed(now=2.6)                    # 突发滑出窗口 → 速率归零，总量保留
+    assert win.sb_tx.text() == "TX: 1000 (0 B/s)"
+    assert win.sb_rx.text() == "RX: 8000 (0 B/s)"
+    win._reset_counters()                         # 右键清零：基线一并清掉立即归零
+    assert win.sb_tx.text() == "TX: 0 (0 B/s)"
+    assert win._speed_samples == []
+
+
+# ---- 转换计算器：只读"C语言数组"框（2026-10-20 用户要求）----
+def test_calculator_c_array_field():
+    from PySide2.QtWidgets import QPlainTextEdit
+
+    from app.ui.calculator_dlg import CalculatorWidget
+    w = CalculatorWidget()
+    assert isinstance(w.c_array, QPlainTextEdit) and w.c_array.isReadOnly()
+    w._recompute(w._from_hex, "十六进制 HEX", "12 34 56 78 9A bc")
+    assert w.c_array.toPlainText() == "0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12"
+    w._recompute(w._from_dec, "十进制 DEC", "65")     # 任意字段联动同步
+    assert w.c_array.toPlainText() == "0x41"
+
+
+# ---- 多条发送表格深色：原生样式直绘部位改主题手绘（2026-10-20 用户反馈白块）----
+def test_multisend_table_dark_delegates(tmp_path):
+    """深色下"点击发送"按钮与 HEX 勾选框不再走 Qt5 原生样式（windowsvista
+    不吃深色调色板，按钮浅灰、未勾选指示器白块），改按主题 QSS 同源颜色手绘；
+    表头角落按钮由 QSS 显式着色。offscreen 抓像素断言三处均为暗色。"""
+    win = MainWindow(Settings(str(tmp_path / "msdark.json")))
+    win.act_theme.setChecked(True)               # 深色：palette+QSS 即生效
+    win.ms_model.rows = [{"note": "", "hex": True, "text": "ABC",
+                          "order": 0, "interval": 1000}]
+    win.ms_model.layoutChanged.emit()
+    t = win.ms_table
+    t.resize(420, 140)
+    img = t.grab().toImage()
+    hdr_h = t.horizontalHeader().height()
+    row_y = t.rowViewportPosition(0) + t.rowHeight(0) // 2
+    # ① 表头角落按钮（行表头×列表头交角）：QSS 显式着色，不再是白色
+    assert img.pixelColor(3, 3).lightness() < 100
+    # ② HEX 勾选框（勾选态）：手绘暗框，取样避开对勾笔画
+    cx = t.columnViewportPosition(1) + t.columnWidth(1) // 2
+    bx, by = cx - 7, row_y - 7                   # 14×14 指示器左上角
+    assert img.pixelColor(bx + 10, by + 10).lightness() < 100
+    # ③ 发送按钮中心：手绘 btn 底色，不是原生浅灰
+    sx = t.columnViewportPosition(0) + t.columnWidth(0) // 2
+    assert img.pixelColor(sx, row_y).lightness() < 100

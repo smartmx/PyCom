@@ -13,14 +13,15 @@ CHECKSUM_KINDS = ("none", "modbus_crc16", "ccitt_crc16", "crc8", "xor8", "add8",
 INI_CHECKSUM_ORDER = ("none", "modbus_crc16", "add8", "xor8")   # N1060 索引 0..3 的原版语义
 # 显示缓冲上限的唯一口径：
 #   默认 10MB —— 日常调试够用；
-#   上限 50MB —— 覆盖"行长 ≤100 字节时满行表（50 万行）所需的全部原始数据"，
-#   屏幕上看得到的一定导得出来（实测详见 docs/02-架构与代码导读.md·缓冲与行表）。
+#   上限 100MB（2026-10-20 由 50MB 放宽）——50MB 已能覆盖"行长 ≤100 字节时
+#   满行表（50 万行）所需的全部原始数据"，屏幕上看得到的一定导得出来，
+#   更大档位只增内存不增能力（实测详见 docs/02-架构与代码导读.md·缓冲与行表）。
 # 注：这个上限只管**原始字节**（保存 *.bin 时能导出多少 + 内存占用）；接收区能往回
 # 看多久由行表的 50 万行上限决定，与它无关。
 # 菜单档位、配置归一化、原版 sscom51.ini 导入都以此为界。
 BUF_CAP_DEFAULT = 10 * 1024 * 1024
-BUF_CAP_MIN = 1024
-BUF_CAP_MAX = 50 * 1024 * 1024
+BUF_CAP_MIN = 500_000           # 菜单最小档（200K 档已删，老配置的更小值收敛到这里）
+BUF_CAP_MAX = 100 * 1024 * 1024
 # 预置编码表（“编码”菜单使用；任意 Python 编码名可经“自定义编码…”手输）
 ENCODINGS = [
     ("GBK (简体中文)", "gbk"),          # 默认；GB2312 的超集
@@ -61,6 +62,8 @@ DEFAULTS = {
     "auto_scroll": True,         # 自动滚屏：关闭后新数据只入缓冲，视图停在当前位置
     "split_show": True,          # 时间戳+分包
     "split_ms": 20,
+    "copy_with_anno": True,      # 复制文本含时间戳和收发标记（接收区右键切换）
+    "save_with_anno": True,      # 保存文本含时间戳和收发标记（同上）
     "ts_color": "",              # 时间戳字体颜色（空=随主题）
     "buffer_cap": BUF_CAP_DEFAULT,
     "send_font": {"family": "宋体", "size": 10, "bold": False,
@@ -200,7 +203,7 @@ class Settings:
         as_int("win_w", 200, 20000)
         as_int("win_h", 200, 20000)
         as_int("split_ms", 1, 5000)
-        as_int("buffer_cap", BUF_CAP_MIN, BUF_CAP_MAX)   # 上限 50MB（菜单最大档）
+        as_int("buffer_cap", BUF_CAP_MIN, BUF_CAP_MAX)   # 上限 100MB（菜单最大档）
         as_int("local_port", 1, 65535)
         as_int("remote_port", 1, 65535)
         as_int("file_delay_ms", 0, 1000)
@@ -230,6 +233,7 @@ class Settings:
                     "_last_file", "ts_color", "theme", "parity", "flow"):
             as_str(key)
         for key in ("dtr", "rts", "hex_mode", "split_show", "auto_scroll",
+                    "copy_with_anno", "save_with_anno",
                     "send_hex", "send_newline", "open_on_start", "auto_reconnect",
                     "term_enter_send", "term_key_send", "term_key_echo",
                     "term_0d_add_0a", "multisend_loop"):

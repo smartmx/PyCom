@@ -41,14 +41,18 @@ QMenu::indicator { width: 0px; height: 0px; }
 QLabel, QCheckBox, QRadioButton { color: %(fg)s; }
 QTabBar::tab { background: %(bar)s; color: %(fg)s; padding: 4px 12px; }
 QTabBar::tab:selected { color: %(accent)s; border-bottom: 2px solid %(accent)s; }
+QTabWidget::pane { background: %(win)s; border: 1px solid %(border)s; }
 QTableView, QPlainTextEdit, QLineEdit, QSpinBox, QComboBox {
   background: %(input)s; color: %(fg)s; border: 1px solid %(border)s;
   border-radius: 2px; padding: 1px 4px; selection-background-color: %(sel)s; }
+QLineEdit:disabled, QSpinBox:disabled { color: %(dis)s; }
 QComboBox QAbstractItemView { background: %(menu)s; color: %(fg)s;
   selection-background-color: %(sel)s; }
 QTableView QHeaderView::section { background: %(bar)s; color: %(fg)s; border: none;
   border-right: 1px solid %(border)s; border-bottom: 1px solid %(border)s;
   padding: 2px 6px; }
+QTableView QTableCornerButton::section { background: %(bar)s; border: none;
+  border-right: 1px solid %(border)s; border-bottom: 1px solid %(border)s; }
 QPushButton {
   background: %(btn)s; color: %(fg)s; border: 1px solid %(border)s;
   border-radius: 2px; padding: 3px 10px; }
@@ -73,10 +77,10 @@ QToolTip { background: %(input)s; color: %(fg)s; border: 1px solid %(border)s; }
 _VARS = {
     "light": dict(win="#F0F0F0", bar="#F0F0F0", menu="#FFFFFF", input="#FFFFFF",
                   btn="#F0F0F0", press="#D8D8D8", border="#A0A0A0",
-                  accent="#0A6EBD", fg="#1A1A1A", sel="#B3D4FC"),
+                  accent="#0A6EBD", fg="#1A1A1A", sel="#B3D4FC", dis="#909090"),
     "dark": dict(win="#252526", bar="#2D2D30", menu="#1F1F1F", input="#1E1E1E",
                  btn="#333337", press="#3F3F46", border="#3F3F46",
-                 accent="#0E639C", fg="#D4D4D4", sel="#264F78"),
+                 accent="#0E639C", fg="#D4D4D4", sel="#264F78", dis="#707070"),
 }
 
 
@@ -114,8 +118,15 @@ def palette(name: str):
         p.setColor(QPalette.Disabled, role, QColor("#6E6E6E"))
     p.setColor(QPalette.Disabled, QPalette.Base, QColor("#232326"))
     p.setColor(QPalette.Disabled, QPalette.Button, QColor("#2B2B2E"))
+    p.setColor(QPalette.Disabled, QPalette.Window, QColor(v["win"]))
     return p
 
 
 def colors(name: str) -> dict[str, QColor]:
     return {k: QColor(v) for k, v in ROLES[name].items()}
+
+
+def vars(name: str) -> dict:
+    """QSS 变量级颜色（win/bar/menu/input/btn/press/border/accent/fg/sel/dis），
+    供原生样式直绘的部位（多条发送表格委托）按主题取色，与 QSS 同源。"""
+    return dict(_VARS[name])

@@ -16,9 +16,9 @@ import sys
 import time
 from functools import partial
 
-from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import (QActionGroup, QFont, QGuiApplication, QIntValidator,
-                           QKeySequence, QShortcut)
+from PySide6.QtCore import QRect, Qt, QTimer, QUrl
+from PySide6.QtGui import (QActionGroup, QDesktopServices, QFont, QGuiApplication,
+                           QIntValidator, QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
                                QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView,
@@ -78,10 +78,10 @@ from app.ui.rxview import RxView
 
 LINK_MODES = [("串口", "serial"), ("TCP客户端", "tcp_client"),
               ("TCP服务端", "tcp_server"), ("UDP", "udp")]
-BUF_SIZES = [("200K", 200_000), ("500K", 500_000), ("1M", 1_048_576),
+BUF_SIZES = [("500K", 500_000), ("1M", 1_048_576),
              ("2M", 2_097_152), ("5M", 5_242_880), ("10M", 10_485_760),
-             ("20M", 20_971_520), ("50M", 52_428_800)]
-# 显示缓冲上限到 50M 为止（口径常量在 settings.BUF_CAP_MAX）：这个上限只管**原始
+             ("20M", 20_971_520), ("50M", 52_428_800), ("100M", 104_857_600)]
+# 显示缓冲上限到 100M 为止（口径常量在 settings.BUF_CAP_MAX）：这个上限只管**原始
 # 字节**（保存 *.bin 能导出多少 + 内存占用）；接收区能回看多久由行表的 50 万行上限
 # 决定，与它无关。50M 已能覆盖"行长 ≤100 字节时满行表所需的全部数据"，
 # 更大的档位只增加内存、不再增加可用能力（实测见 docs/02-架构与代码导读.md·缓冲与行表）。
@@ -107,8 +107,7 @@ class MainWindow(QMainWindow):
         self.link = None
         self.tx_bytes = 0
         self.rx_bytes = 0
-        self._tx_acc = 0             # 每秒字节累计（收发速率用）
-        self._rx_acc = 0
+        self._speed_samples = []     # (monotonic, tx, rx) 采样，速率取 1s 滑窗
         self._link_err = False       # 线路 ERR 指示
         self._link_pending = False   # 已请求打开但未连上（占用重试/断线重连）：按钮转「取消」
         self._tx_pend: list[tuple[bytes, bool]] = []  # 待发余量分段队列：(字节, 是否记录TX显示)
@@ -349,7 +348,7 @@ class MainWindow(QMainWindow):
         nv.addLayout(nled)
         nr1 = QHBoxLayout()
         nr1.addWidget(QLabel("远程"))
-        self.edit_remote_ip = QLineEdit()
+        self.edit_remote_ip = QLineEdit()     # tooltip 由 _sync_net_locks 按模式管理
         self.edit_remote_port = QSpinBox()
         self.edit_remote_port.setRange(1, 65535)
         self.edit_remote_port.setMaximumWidth(70)
@@ -426,7 +425,7 @@ class MainWindow(QMainWindow):
         self.cb_send_hex = QCheckBox("HEX发送")
         self.cb_timed = QCheckBox("定时发送:")
         self.sp_timed = QSpinBox()
-        self.sp_timed.setRange(10, 3_600_000)
+        self.sp_timed.setRange(1, 3_600_000)   # 最小 1ms（Windows 实际精度受系统定时器粒度限制）
         self.cb_newline = QCheckBox("加回车换行")
         for w in (self.cb_send_hex, self.cb_timed, self.sp_timed,
                   QLabel("ms/次"), self.cb_newline):
@@ -633,6 +632,8 @@ class MainWindow(QMainWindow):
         m_tool.addAction("设备管理器").triggered.connect(self._open_devmgr)
 
         m_help = mb.addMenu("帮助")
+        self.act_check_update = m_help.addAction("检查更新…")
+        self.act_check_update.triggered.connect(self._open_release_page)
         m_help.addAction("关于 PyCom").triggered.connect(self._about)
 
         # 快捷键（Ctrl+F 由显示菜单的"查找"action 绑定，避免重复触发）
@@ -701,6 +702,9 @@ class MainWindow(QMainWindow):
         self.cb_auto_scroll.setChecked(d.get("auto_scroll", True))
         # toggled→RxView 的连接在 _wire() 里才建立，这里需显式同步初始状态
         self.rxview.set_auto_scroll(bool(d.get("auto_scroll", True)))
+        # 复制/保存是否带出时间戳与收发标识（接收区右键切换，与显示设置独立）
+        self.rxview.copy_with_anno = bool(d.get("copy_with_anno", True))
+        self.rxview.save_with_anno = bool(d.get("save_with_anno", True))
         self.cb_timestamp.setChecked(d["split_show"])
         self.sp_split_ms.setValue(d["split_ms"])
         self._encoding = d["encoding"]
@@ -828,6 +832,10 @@ class MainWindow(QMainWindow):
 
         self.cb_hex_show.toggled.connect(self._on_hex_show_toggled)
         self.cb_auto_scroll.toggled.connect(self.rxview.set_auto_scroll)
+        # 用户回看（滚轮上翻/拖选/拖滚动条）→ 自动取消勾选（跟随停住，可安心
+        # 选择复制）；重新勾选由 set_auto_scroll(True) 立即跳回底部
+        self.rxview.pause_auto_scroll.connect(
+            lambda: self.cb_auto_scroll.setChecked(False))
         self.cb_timestamp.toggled.connect(self._set_split)
         self.sp_split_ms.valueChanged.connect(self._set_split)
         self.cb_break.toggled.connect(self._set_break)
@@ -847,7 +855,7 @@ class MainWindow(QMainWindow):
         self.pin_timer.start(300)
         self.speed_timer = QTimer(self)
         self.speed_timer.timeout.connect(self._update_speed)
-        self.speed_timer.start(1000)
+        self.speed_timer.start(250)
 
         self.btn_ms_add.clicked.connect(self.ms_model.add_row)
         self.btn_ms_del.clicked.connect(self._ms_del)
@@ -904,6 +912,12 @@ class MainWindow(QMainWindow):
             # 点击接收区后焦点可能在外框 RxView 上（见 _wire 注释），两个对象
             # 的按键都按同一套逻辑处理。
             if ev.type() == ev.Type.KeyPress:
+                # 接收区有选区时 Ctrl+C / Ctrl+Insert = 复制所选：透传给
+                # 接收区处理，不作终端输入（终端仿真开启时 Ctrl+C 本会发 0x03）
+                if (ev.modifiers() & Qt.ControlModifier
+                        and ev.key() in (Qt.Key_C, Qt.Key_Insert)
+                        and self.rxview.has_selection()):
+                    return False
                 if self.act_term_key.isChecked():
                     # 【按键立即发送键值】按键即发；record=False：显示由
                     # "本地回显"勾选单独控制，避免链路打开时显示两遍
@@ -1013,6 +1027,23 @@ class MainWindow(QMainWindow):
         if self.link:
             self._close_link()
         self._on_state("closed") if not quiet else None
+        self._sync_net_locks()
+
+    def _sync_net_locks(self):
+        """按模式锁死与本模式无关的输入框并给原因提示（2026-10-20 用户定稿）：
+        TCP 客户端不使用本机端口；TCP 服务器不使用远程 IP/端口；UDP 四项全有效。"""
+        remote_hint = ("远程主机：IPv4/IPv6 地址或主机名（主机名仅 TCP 客户端支持，"
+                       "UDP 只认地址字面量，如 ::1、fe80::x%接口）")
+        server_lock = "TCP 服务器无需配置远程IP和端口"
+        m = self._mode
+        client = m == "tcp_client"
+        self.edit_remote_ip.setEnabled(m != "tcp_server")
+        self.edit_remote_port.setEnabled(m != "tcp_server")
+        self.edit_local_port.setEnabled(not client)
+        self.edit_remote_ip.setToolTip(remote_hint if m != "tcp_server" else server_lock)
+        self.edit_remote_port.setToolTip("" if m != "tcp_server" else server_lock)
+        self.edit_local_port.setToolTip(
+            "" if not client else "TCP 客户端无需配置本机端口")
 
     def _toggle_collapse(self, on):
         """收起/展开底部串口参数面板（对齐 SSCOM 的面板折叠）：收起时只留接收区、
@@ -1138,8 +1169,8 @@ class MainWindow(QMainWindow):
         self._trim_lines_to_buf()              # 行表跟随缓冲：屏幕有的必导得出来
         self.find_bar.notify_data_changed()    # 新数据可能带来新命中/裁剪旧命中
         self.rx_bytes += len(data)
-        self._rx_acc += len(data)
-        self.sb_rx.setText("RX: %d" % self.rx_bytes)
+        # 不在此处刷新状态栏（旧实现写"RX: %d"会把速率后缀抹掉）——
+        # 速率/总量统一由 _update_speed 定时渲染
 
     def _trim_lines_to_buf(self) -> None:
         """行表保留范围跟随接收缓冲（字节缓冲丢掉的旧字节，对应行也丢掉），
@@ -1150,9 +1181,7 @@ class MainWindow(QMainWindow):
         self.builder.trim_before_abs(self.buf.start_abs, keep_after_line=keep)
 
     def _on_tx(self, n: int):
-        self.tx_bytes += n
-        self._tx_acc += n
-        self.sb_tx.setText("TX: %d" % self.tx_bytes)
+        self.tx_bytes += n        # 状态栏同样交由 _update_speed 定时渲染
 
     @staticmethod
     def _style_pin(lbl, active, err=False):
@@ -1175,10 +1204,22 @@ class MainWindow(QMainWindow):
             self._style_pin(self.pin_leds[nm], bool(sigs) and bool(sigs & fl))
         self._style_pin(self.pin_leds["ERR"], self._link_err, err=True)
 
-    def _update_speed(self):
-        self.sb_tx.setText("TX: %d (%d B/s)" % (self.tx_bytes, self._tx_acc))
-        self.sb_rx.setText("RX: %d (%d B/s)" % (self.rx_bytes, self._rx_acc))
-        self._tx_acc = self._rx_acc = 0
+    def _update_speed(self, now=None):
+        """收发速率/总量定时渲染（250ms 一次）：速率取最近 1 秒滑窗的字节增量，
+        突发后能保持满一秒才衰减归零——不再"偶尔显示"。now 供测试注入时钟。"""
+        now = time.monotonic() if now is None else now
+        self._speed_samples.append((now, self.tx_bytes, self.rx_bytes))
+        while len(self._speed_samples) > 2 and \
+                now - self._speed_samples[0][0] > 1.5:
+            self._speed_samples.pop(0)
+        base = self._speed_samples[0]
+        dt = now - base[0]
+        if dt < 0.2:
+            return                       # 首拍样本太近：下一拍再算
+        tx_bps = max(0, int((self.tx_bytes - base[1]) / dt))
+        rx_bps = max(0, int((self.rx_bytes - base[2]) / dt))
+        self.sb_tx.setText("TX: %d (%d B/s)" % (self.tx_bytes, tx_bps))
+        self.sb_rx.setText("RX: %d (%d B/s)" % (self.rx_bytes, rx_bps))
 
     def _set_break(self, on: bool):
         sp = getattr(self.link, "sp", None) if self.link else None
@@ -1229,10 +1270,14 @@ class MainWindow(QMainWindow):
             # 打开失败。是否转「取消」由紧随的 reconnecting 状态决定（串口/
             # TCP 客户端开了自动重连才会发）；不会重试的失败（服务端侦听失败、
             # UDP 绑定失败、未开自动重连）按钮保持「打开」，直接点即再次尝试。
+            # UDP 发送失败是例外：链路仍绑定、可收可发（is_open），界面保持
+            # 「已连接/关闭」只亮 ERR 灯并通知原因——按钮动作与真实动作一致
+            #（十六轮 F2：否则按钮写「打开」点击却执行关闭）。
             self._link_pending = False
             self._link_err = True
-            self.sb_state.setText("未连接")
-            self.btn_link.setText(open_txt)
+            still = bool(self.link and self.link.is_open())
+            self.sb_state.setText("已连接" if still else "未连接")
+            self.btn_link.setText("关闭" if still else open_txt)
             led_bg = "#FF4136"
             self._notify(state[7:] if state.startswith("error: ") else state)
         for lbl in (self.lbl_led, self.lbl_led2):
@@ -1271,7 +1316,10 @@ class MainWindow(QMainWindow):
             return
         n = self.link.write(data)
         if n <= 0:
-            self._notify("写入失败或对端未就绪（0 字节）")
+            # 链路已自行上报具体原因（如 UDP 远程地址无法解析，十六轮 F3）
+            # 时不再叠加通用提示，避免第 4 格的具体原因被通用文案覆盖
+            if not getattr(self.link, "send_err_active", False):
+                self._notify("写入失败或对端未就绪（0 字节）")
             self._enqueue_tx(data, record)
             return
         if n < len(data):                       # 部分接受：剩余接队尾待续发
@@ -1337,7 +1385,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_timed(self):
         if self.cb_timed.isChecked():
-            self.timed_timer.start(max(10, self.sp_timed.value()))
+            self.timed_timer.start(max(1, self.sp_timed.value()))
         else:
             self.timed_timer.stop()
 
@@ -1601,6 +1649,7 @@ class MainWindow(QMainWindow):
                 table.setItem(d, col, it)
         table.resizeColumnsToContents()
         table.setColumnWidth(4, 150)
+        table.horizontalHeader().setStretchLastSection(True)   # 末列撑满：不留原生白底
 
         def copy_char(idx):
             ch = chr(idx.row()) if 32 <= idx.row() <= 126 else \
@@ -1690,19 +1739,24 @@ class MainWindow(QMainWindow):
 
     def _refresh_nics(self, select_ip=None):
         """枚举本机网络接口填入"网卡"下拉（"全部网卡" + 各接口，含热插拔后刷新）。
-        select_ip 用于自动选中包含该地址的网卡。选中网卡后本地 IP 只列该网卡地址。"""
+        select_ip 用于自动选中包含该地址的网卡。选中网卡后本地 IP 只列该网卡地址。
+        地址表为 IPv4 在前、IPv6 在后（选中即按该地址单栈绑定，两族互不混收）。"""
         from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
-        nics = []                              # [(显示名, [IPv4, ...])]
+        nics = []                              # [(显示名, [IPv4..., IPv6...])]
         for if_ in QNetworkInterface.allInterfaces():
             if not (if_.flags() & QNetworkInterface.InterfaceFlag.IsUp):
                 continue
-            addrs = []
+            v4, v6 = [], []
             for e in if_.addressEntries():
                 ip = e.ip()
+                t = ip.toString()
                 if ip.protocol() == QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
-                    t = ip.toString()
-                    if t not in addrs:
-                        addrs.append(t)
+                    if t not in v4:
+                        v4.append(t)
+                elif ip.protocol() == QAbstractSocket.NetworkLayerProtocol.IPv6Protocol:
+                    if t not in v6:            # 链路本地自带 %作用域（fe80::x%xx）
+                        v6.append(t)
+            addrs = v4 + v6
             if not addrs:
                 continue
             name = if_.humanReadableName() or if_.name()
@@ -1712,7 +1766,7 @@ class MainWindow(QMainWindow):
         self.cmb_nic.blockSignals(True)
         self.cmb_nic.clear()
         self.cmb_nic.addItem("全部网卡", None)
-        self.cmb_nic.setItemData(0, "本机所有 IPv4 地址", Qt.ToolTipRole)
+        self.cmb_nic.setItemData(0, "本机所有网卡地址（IPv4/IPv6）", Qt.ToolTipRole)
         auto = -1
         for label, addrs in nics:
             self.cmb_nic.addItem(label, addrs)
@@ -1741,22 +1795,41 @@ class MainWindow(QMainWindow):
         self._refresh_local_ips(select=self.cmb_local_ip.currentText())
 
     def _refresh_local_ips(self, select=None):
-        """按当前网卡选择填充"本地"IP 下拉：全部网卡=本机所有 IPv4（对齐 SSCOM）。"""
-        addrs = []
+        """按当前网卡选择填充"本地"IP 下拉。单栈语义——选中哪个地址就只绑定
+        该族：全部网卡 = 0.0.0.0（仅 IPv4 全部）+ 各 IPv4 + ::（仅 IPv6 全部）
+        + 各 IPv6（全局在前、链路本地 fe80::x%作用域 在后）；指定网卡 = 只列
+        该网卡地址（IPv4 在前 IPv6 在后）。"""
+        from PySide6.QtNetwork import QNetworkInterface
+        v4, v6 = [], []
         nic_addrs = self.cmb_nic.currentData()
         if nic_addrs:
-            addrs = list(nic_addrs)            # 指定网卡：只列该网卡地址
+            for t in nic_addrs:                # IPv6 必含 ":"，IPv4 必不含
+                (v6 if ":" in t else v4).append(t)
         else:
-            from PySide6.QtNetwork import QNetworkInterface
             for if_ in QNetworkInterface.allInterfaces():
                 for e in if_.addressEntries():
-                    ip = e.ip().toString()
-                    if "." in ip and ip not in addrs:
-                        addrs.append(ip)
-            if "127.0.0.1" not in addrs:
-                addrs.append("127.0.0.1")
+                    t = e.ip().toString()
+                    if ":" in t:
+                        if t not in v6:
+                            v6.append(t)
+                    elif t not in v4:
+                        v4.append(t)
+            if "127.0.0.1" not in v4:
+                v4.append("127.0.0.1")
+        v6.sort(key=lambda s: (s.startswith("fe80"), s))   # 全局地址在前
+        if nic_addrs:
+            addrs = v4 + v6
+        else:
+            addrs = (["0.0.0.0"] + v4 + ["::"] + v6)
         self.cmb_local_ip.clear()
         self.cmb_local_ip.addItems(addrs)
+        if not nic_addrs:                      # 两个"全部地址"项给足语义提示
+            self.cmb_local_ip.setItemData(0, "仅 IPv4（所有网卡）", Qt.ToolTipRole)
+            i6 = self.cmb_local_ip.findText("::")
+            if i6 > 0:
+                self.cmb_local_ip.setItemData(i6, "仅 IPv6（所有网卡）；选中后"
+                                              "只收发 IPv6，不混收 IPv4",
+                                              Qt.ToolTipRole)
         if select:
             i = self.cmb_local_ip.findText(select)
             if i >= 0:
@@ -1950,6 +2023,12 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             return 115200
 
+    def _open_release_page(self):
+        """检查更新：打开发布页（最新版发布与下载在网页进行，应用内不联网）。"""
+        url = "https://github.com/smartmx/PyCom/releases/latest"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            self._notify("无法打开浏览器，请手动访问 " + url)
+
     def _about(self):
         QMessageBox.about(self, "关于 PyCom",
                           "<b>PyCom 串口/网络数据调试器</b>"
@@ -1983,7 +2062,7 @@ class MainWindow(QMainWindow):
                 try:
                     with open(path, "w", encoding=self._current_encoding(),
                               errors="replace") as f:
-                        f.write(self.rxview.plain_text())
+                        f.write(self.rxview.plain_text(self.rxview.save_with_anno))
                 except (OSError, LookupError, UnicodeEncodeError) as ex:
                     QMessageBox.warning(self, "保存数据", "保存失败: %s" % ex)
 
@@ -1994,7 +2073,8 @@ class MainWindow(QMainWindow):
 
     def _reset_counters(self):
         """右键状态栏清零收发计数与速率。"""
-        self.tx_bytes = self.rx_bytes = self._tx_acc = self._rx_acc = 0
+        self.tx_bytes = self.rx_bytes = 0
+        self._speed_samples = []     # 旧采样基线一并清掉，速率立即归零
         self.sb_tx.setText("TX: 0 (0 B/s)")
         self.sb_rx.setText("RX: 0 (0 B/s)")
 
@@ -2032,6 +2112,8 @@ class MainWindow(QMainWindow):
         d["auto_scroll"] = self.cb_auto_scroll.isChecked()
         d["split_show"] = self.cb_timestamp.isChecked()
         d["split_ms"] = self.sp_split_ms.value()
+        d["copy_with_anno"] = self.rxview.copy_with_anno
+        d["save_with_anno"] = self.rxview.save_with_anno
         d["send_hex"] = self.cb_send_hex.isChecked()
         d["main_text"] = self.send_edit.toPlainText()
         d["send_newline"] = self.cb_newline.isChecked()

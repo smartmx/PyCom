@@ -13,14 +13,15 @@ CHECKSUM_KINDS = ("none", "modbus_crc16", "ccitt_crc16", "crc8", "xor8", "add8",
 INI_CHECKSUM_ORDER = ("none", "modbus_crc16", "add8", "xor8")   # N1060 索引 0..3 的原版语义
 # 显示缓冲上限的唯一口径（本分支是 32 位产物，见 docs/04-Win7-32位适配说明.md）：
 #   默认 5MB  —— 日常调试够用且内存占用低；
-#   上限 20MB —— 32 位进程 2GB 地址空间下留足余量（实测 512M 档灌到 310MB 就
-#   MemoryError、256M 档峰值提交 842MB，见 tools/mem_probe.py）。
+#   上限 50MB —— 2026-10-20 应用户要求放宽（原 20MB）：历史实测 128M/256M 档峰值
+#   提交 356MB/842MB 正常、512M 档灌到 310MB 才 MemoryError（tools/mem_probe.py），
+#   50M 远离 OOM 线，且内存耗尽自动降档（_shrink_on_oom）兜底。
 # 注：这个上限只管**原始字节**（保存 *.bin 时能导出多少 + 内存占用）；接收区能往回
 # 看多久由行表的 50 万行上限决定，与它无关。
 # 菜单档位、配置归一化、原版 sscom51.ini 导入都以此为界。
 BUF_CAP_DEFAULT = 5 * 1024 * 1024
-BUF_CAP_MIN = 1024
-BUF_CAP_MAX = 20 * 1024 * 1024
+BUF_CAP_MIN = 500_000           # 菜单最小档（200K 档已删，老配置的更小值收敛到这里）
+BUF_CAP_MAX = 50 * 1024 * 1024  # 50M 档 2026-10-20 加入：仍远离 512M 档 OOM 线，OOM 自动降档兜底
 # 预置编码表（“编码”菜单使用；任意 Python 编码名可经“自定义编码…”手输）
 ENCODINGS = [
     ("GBK (简体中文)", "gbk"),          # 默认；GB2312 的超集
@@ -61,6 +62,8 @@ DEFAULTS = {
     "auto_scroll": True,         # 自动滚屏：关闭后新数据只入缓冲，视图停在当前位置
     "split_show": True,          # 时间戳+分包
     "split_ms": 20,
+    "copy_with_anno": True,      # 复制文本含时间戳和收发标记（接收区右键切换）
+    "save_with_anno": True,      # 保存文本含时间戳和收发标记（同上）
     "ts_color": "",              # 时间戳字体颜色（空=随主题）
     "buffer_cap": BUF_CAP_DEFAULT,
     "send_font": {"family": "宋体", "size": 10, "bold": False,
@@ -200,7 +203,7 @@ class Settings:
         as_int("win_w", 200, 20000)
         as_int("win_h", 200, 20000)
         as_int("split_ms", 1, 5000)
-        as_int("buffer_cap", BUF_CAP_MIN, BUF_CAP_MAX)   # 上限 20MB（32 位安全档）
+        as_int("buffer_cap", BUF_CAP_MIN, BUF_CAP_MAX)   # 上限 50MB（菜单最大档）
         as_int("local_port", 1, 65535)
         as_int("remote_port", 1, 65535)
         as_int("file_delay_ms", 0, 1000)
@@ -230,6 +233,7 @@ class Settings:
                     "_last_file", "ts_color", "theme", "parity", "flow"):
             as_str(key)
         for key in ("dtr", "rts", "hex_mode", "split_show", "auto_scroll",
+                    "copy_with_anno", "save_with_anno",
                     "send_hex", "send_newline", "open_on_start", "auto_reconnect",
                     "term_enter_send", "term_key_send", "term_key_echo",
                     "term_0d_add_0a", "multisend_loop"):

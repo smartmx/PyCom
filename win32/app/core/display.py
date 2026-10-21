@@ -3,7 +3,9 @@
 
 特性：
 - HEX / ASCII 两种模式（ASCII 支持任意编码，增量解码跨行保真）
-- 分包显示：空闲超过 split_ms 切包，包首带时间戳前缀
+- 分包显示：空闲超过 split_ms 切包，包首带时间戳前缀；前缀随行记录（与
+  "加时间戳和分包显示"勾选无关——显示/复制/保存各自决定是否带出），
+  split 只控制渲染与日志是否把前缀拼出来
 - 持续流：UI tick 增量续写当前包（实时显示、pending 有上限），不丢实时性
 - 方向交替立即切包；ASCII 模式下未结束的行跨包延续
 - 显示行表有上限：超限裁剪最旧行（防 OOM），外部游标用 base 换算绝对行号
@@ -92,6 +94,9 @@ class LineBuilder:
         self.flush()
 
     def set_split(self, on: bool, ms: int | None = None) -> None:
+        """分包显示开关：只决定显示/转存是否把包首时间戳前缀与方向标识
+        带出；前缀与包边界一直随行记录（复制/保存可独立选择带出，且
+        切换后对已收数据同样生效）。"""
         self.split = on
         if ms is not None:
             self.split_ms = ms
@@ -205,9 +210,10 @@ class LineBuilder:
             self._cr_hold = False
             # 包内只有挂起 \r 时（如单个 CR 的空行/心跳包），本包时间戳尚未
             # 消费：此处补上，保证该空行同样带 [时间戳] 与方向标识（对齐
-            # 有文本包的语义；否则该行既无前缀也无标识）
+            # 有文本包的语义；否则该行既无前缀也无标识）。前缀随行记录，
+            # 是否显示由 split 决定（见 set_split）
             prefix = ""
-            if self.split and self._pend_ts is not None and not self._packet_stamped:
+            if self._pend_ts is not None and not self._packet_stamped:
                 prefix = ts_prefix(self._pend_ts)
                 self._packet_stamped = True
             self._emit_text(self._pend_dir or "rx", self._pend_ts, prefix, "\n",
@@ -229,7 +235,8 @@ class LineBuilder:
         if not self._pend_buf:
             return
         direction = self._pend_dir or "rx"
-        stamp = (self.split and self._pend_ts is not None and not self._packet_stamped)
+        # 前缀随行记录（与 split 无关）：显示、复制、保存各自决定是否带出
+        stamp = (self._pend_ts is not None and not self._packet_stamped)
         prefix = ts_prefix(self._pend_ts) if stamp else ""
         data = bytes(self._pend_buf)
         abs0 = self._pend_abs

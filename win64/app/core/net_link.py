@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
-"""网络连接：TCP 客户端 / TCP 服务端 / UDP（主线程事件驱动）。"""
+"""网络连接：TCP 客户端 / TCP 服务端 / UDP（主线程事件驱动）。
+
+IPv4/IPv6 纯单栈语义：本地绑定地址是哪个族就只收发哪个族（0.0.0.0=仅 IPv4
+全部、::=仅 IPv6 全部、具体地址=仅该地址，链路本地 fe80::x%作用域 直接可用），
+不做双栈。TCP 客户端连接前按所选本机地址预绑定（限定源网卡与协议族），族由
+绑定与远程地址共同决定。"""
 from __future__ import annotations
 
 from PySide6.QtNetwork import (QTcpServer, QTcpSocket, QAbstractSocket,
                                QUdpSocket, QHostAddress)
 
 from .link import Link
+
+
+def _strip_brackets(host: str) -> str:
+    """远程主机写法宽容：[::1] → ::1（用户常从浏览器/URL 复制带方括号的
+    IPv6 地址，而 QHostAddress/QHostInfo 都不认方括号）。"""
+    h = (host or "").strip()
+    if len(h) >= 2 and h[0] == "[" and h[-1] == "]":
+        return h[1:-1]
+    return h
 
 
 class TcpClientLink(Link):
@@ -27,7 +41,21 @@ class TcpClientLink(Link):
         self._want_open = True
         if self.sock.state() == QAbstractSocket.ConnectedState:
             return True
-        self.sock.connectToHost(self.cfg["remote_ip"], int(self.cfg["remote_port"]))
+        self.sock.abort()       # 回到未绑定态，防重连路径上重复 bind 失败
+        # 按所选本机地址预绑定（此前从不绑定，"本机 IP"下拉形同虚设——十九轮
+        # F1）：具体地址=限定源地址/出口网卡；0.0.0.0 / ::=限定协议族，与其余
+        # 两模式同语义。端口 0=系统分配临时端口（TCP 客户端无需配置本机端口）。
+        local = QHostAddress(self.cfg.get("local_ip") or QHostAddress.AnyIPv4)
+        if local.isNull():
+            local = QHostAddress(QHostAddress.AnyIPv4)
+        if not self.sock.bind(local, 0):
+            self.state_changed.emit("error: 本机IP绑定失败(%s)"
+                                    % self.sock.errorString())
+            self._schedule()
+            return False
+        # IPv4/IPv6 字面量与主机名（含 AAAA）都交给 Qt 解析；族由绑定+远程决定
+        self.sock.connectToHost(_strip_brackets(self.cfg["remote_ip"]),
+                                int(self.cfg["remote_port"]))
         return False        # 异步连接，结果经信号通知
 
     def close(self) -> None:
@@ -185,6 +213,8 @@ class UdpLink(Link):
         self.cfg = cfg
         self.sock = QUdpSocket(self)
         self.sock.readyRead.connect(self._on_rx)
+        self.send_err_active = False          # 发送失败提示去重（定时发送不刷屏）；
+                                              # 主窗口 _write 据此跳过通用提示（F3）
 
     def open(self) -> bool:
         addr = QHostAddress(self.cfg.get("local_ip") or QHostAddress.AnyIPv4)
@@ -209,11 +239,32 @@ class UdpLink(Link):
                 self.rx.emit(bytes(dg.data()))
 
     def write(self, data: bytes) -> int:
-        host = QHostAddress(self.cfg["remote_ip"] or "127.0.0.1")
+        host = QHostAddress(_strip_brackets(self.cfg["remote_ip"] or "127.0.0.1"))
+        if host.isNull():
+            return self._send_fail("远程IP无法解析(%s)"
+                                   % (self.cfg["remote_ip"] or ""))
         n = self.sock.writeDatagram(data, host, int(self.cfg["remote_port"]))
+        if n < 0:
+            # 常见于族不匹配（本地绑 :: 只收发 IPv6，远程却是 IPv4 地址）等
+            return self._send_fail(self.sock.errorString() or "发送失败")
+        self._send_recover()
         if n > 0:
             self.tx_done.emit(int(n))
         return int(n)
+
+    def _send_fail(self, reason: str) -> int:
+        """发送失败经 state 报一次（红灯+通知），恢复成功后回 open——链路本身
+        保持绑定（界面保持已连接/关闭，见主窗口 _on_state），去重避免定时发送
+        刷屏；send_err_active 供主窗口 _write 门控通用提示。"""
+        if not self.send_err_active:
+            self.send_err_active = True
+            self.state_changed.emit("error: %s" % reason)
+        return 0
+
+    def _send_recover(self) -> None:
+        if self.send_err_active:
+            self.send_err_active = False
+            self.state_changed.emit("open")
 
     def is_open(self) -> bool:
         return self.sock.state() == QAbstractSocket.BoundState

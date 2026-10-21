@@ -166,17 +166,33 @@ def test_cr_only_packet_gets_prefix():
     vis = lb.visible()
     assert len(vis) == 1 and vis[0].text == ""
     assert vis[0].prefix.startswith("[")  # 包首空行同享本包时间戳
-    # 未勾选分包显示时无前缀（纯文本语义）
+    # 未勾选分包显示时前缀仍随行记录（复制/保存选项可独立带出，显示不带出）
     lb2 = LineBuilder(split=False)
     lb2.feed("rx", b"\r", 1.0, 0)
     lb2.flush()
-    assert lb2.visible()[0].prefix == ""
+    assert lb2.visible()[0].prefix.startswith("[")
     # 包内已有文本时，尾部挂起 CR 不应再消费第二个前缀
     lb3 = LineBuilder(split=True, split_ms=20)
     lb3.feed("rx", b"abc\r", 1.0, 0)
     lb3.flush()
     vis3 = lb3.visible()
     assert sum(1 for l in vis3 if l.prefix) == 1, [l.prefix for l in vis3]
+
+
+# ---- 复制/保存含时间戳：分包显示未勾选时前缀同样随行记录（选项与显示独立）----
+def test_prefix_recorded_when_split_off():
+    lb = LineBuilder(split=False, split_ms=20)
+    lb.feed("rx", b"one\r\n", 1.0, 0)
+    lb.flush()                            # 包 1
+    lb.feed("rx", b"two\r\n", 2.0, 5)
+    lb.flush()                            # 包 2：独立时间戳
+    vis = lb.visible()
+    assert [l.text for l in vis] == ["one", "two"]
+    assert all(l.prefix.startswith("[") for l in vis), [l.prefix for l in vis]
+    # 未收尾行（持续流增量落行）同样带前缀：复制/保存经由 visible() 取行
+    lb.feed("rx", b"tail", 3.0, 10)
+    lb.maybe_flush(3.0)
+    assert lb.visible()[-1].prefix.startswith("[")
 
 
 # ---- P1-5: 配置加载/保存防护 ----
@@ -498,7 +514,7 @@ def test_import_original_ini(tmp_path):
     assert d["send_interval_ms"] == 1500
     assert d["hex_mode"] is True
     assert d["checksum_kind"] == "modbus_crc16"
-    assert d["buffer_cap"] == 20 * 1024 * 1024   # ini 里的 128MB 被 32 位上限（20M）钳住
+    assert d["buffer_cap"] == 50 * 1024 * 1024   # ini 里的 128MB 被 32 位上限（50M）钳住
     assert d["remote_ip"] == "192.168.1.10" and d["remote_port"] == 9000
     assert d["local_port"] == 8888
     assert d["mode"] == "tcp_client"

@@ -88,6 +88,7 @@ def normalize(text: str) -> list:
 # 背景（审查第六轮 T1）：「改测试不改文档条数」的漂移一再复发，改为机制兜底：
 # pytest --collect-only 数出实收，再扫文档里的「N 项」陈述逐一核对。
 _NUM_ITEM = re.compile(r"([多少差]\s*)?(\d+)\s*项")
+_NUM_BOLD = re.compile(r"\*\*(\d+)\*\*")   # 表格粗体数字（docs/05 §1 形态）也算条数陈述
 # 分式写法（98/98 单测）先归一成「N 项」再扫；分母任意、后随「单测/项」才认，
 # 「8/22 文件」「2026/10/16」这类不受影响
 _FRACTION_TESTS = re.compile(r"(?<![\d/])(\d+)\s*/\s*\d+\s*(?=单测|项)")
@@ -134,6 +135,13 @@ def scan_numbers(text: str, label: str, allowed: set, problems: list) -> int:
             n = int(m.group(2))
             if n not in allowed:
                 problems.append("%s:%d  %d 不在允许集 %s ｜ %s"
+                                % (label, i, n, sorted(allowed),
+                                   ln.strip()[:70]))
+        for m in _NUM_BOLD.finditer(ln):
+            checked += 1
+            n = int(m.group(1))
+            if n not in allowed:
+                problems.append("%s:%d  **%d** 不在允许集 %s ｜ %s"
                                 % (label, i, n, sorted(allowed),
                                    ln.strip()[:70]))
     return checked
