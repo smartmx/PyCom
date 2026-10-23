@@ -28,7 +28,7 @@
 | 多条发送 | 最多 100 条、注释、每条 ASC/HEX 与延时、循环发送、+/- 增删 |
 | 校验 | 对齐 SSCOM：末尾 1~4 字节视为帧尾、校验插在帧尾前面 / 末尾追加（旧版保留档）；算法（含"无校验"）无 / ModbusCRC16 / CCITT_CRC16 / CRC8 / ADD8 / ADD16 / XOR8，第 N 字节起算 |
 | 终端仿真 | 回车后发送新行(带回显)（默认选中，对齐 SSCOM）/ 按键立即发送该键值（两方式互斥）；本地回显按键值仅按键方式可用；回车 0x0d 自动补 0x0a |
-| 工具 | 转换计算器（DEC/HEX/BIN/ASCII/float 大小端） |
+| 工具 | 进制转换（DEC/HEX/BIN/ASCII/float 大小端，V0.0.4 更名） |
 | 兼容 | 一键导入原版 `sscom51.ini`（参数+多条字符串） |
 | 其它 | 状态栏 TX/RX 计数（右键清零）、窗口置顶、参数持久化（**pycom32.json**，与 exe 同目录；与 PyCom 的 pycom.json 相互独立，同目录共存互不覆盖） |
 
@@ -67,7 +67,7 @@ tests/     pytest 单测（校验算法/分包/编码跨包/环形缓冲/ini导�
 
 ## 验证
 
-- `"D:\Program Files\Python38-x32\python.exe" -m pytest tests/` → **131 项单测全通过**（32 位 Python 3.8 + PySide2/Qt5 离屏环境，2026-10-20）
+- `"D:\Program Files\Python38-x32\python.exe" -m pytest tests/` → **134 项单测全通过**（32 位 Python 3.8 + PySide2/Qt5 离屏环境，2026-10-22）
 - 产物审计：`python tools\audit_dist_win7.py`（单文件 exe：位数/引导器导入）+ `python tools\audit_dist_win7.py vendor\ucrt-x86`（随包 UCRT 血统）→ 均「未发现 Win7 兼容性风险项」
 - 打包产物（`dist\PyCom32.exe` 单文件版）已在 Win11 开发机启动冒烟通过（2026-10-16）
 - 32 位内存实测 `python tools\mem_probe.py 5 10 20`：128M/256M 档正常（峰值提交 356MB/842MB），512M 档灌到 310MB 分配失败 ⇒ 上限定 20M、默认 5M

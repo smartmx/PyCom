@@ -1461,12 +1461,13 @@ def test_rx_oom_feed_failure_no_double_append(tmp_path, monkeypatch):
 
 
 # ---- 窄窗模式：向左缩到配置框宽度，右侧发送/选项区隐藏（对齐 SSCOM）----
-def test_narrow_mode_hides_right_panel(tmp_path):
+def test_narrow_mode_clips_right_panel(tmp_path):
+    """SSCOM 式缩窗：右侧不隐藏、保持自然宽度被窗口边缘截断，左块永不压缩。"""
     win = MainWindow(Settings(str(tmp_path / "narrow.json")))
     win.show()
     for _ in range(3):
         app.processEvents()
-    win.resize(900, 620)
+    win.resize(1000, 620)
     for _ in range(3):
         app.processEvents()
     assert win.send_edit.isVisible() and win.sb_link.isVisible()
@@ -1474,11 +1475,19 @@ def test_narrow_mode_hides_right_panel(tmp_path):
     for _ in range(5):
         app.processEvents()
     assert win.width() == 340                    # 能缩到配置框宽度附近
-    assert not win.send_edit.isVisible()         # 发送输入框隐藏
+    assert win.send_edit.isVisible()             # 发送输入框不再隐藏（压缩后随区截断）
     assert not win.sb_link.isVisible()           # 状态栏连接信息让位
     assert win.cb_break.isVisible()              # 配置列（线路行）保留
     assert win.cmb_baud.isVisible() and win.btn_link.isVisible()
-    win.resize(900, 620)                         # 展宽恢复
+    # 左块钉在自然宽度：串口列、工具行左组、文件块首键都不被压缩
+    assert win.serial_box.width() == win.btn_send.width()
+    assert win.btn_clear.width() == win.btn_clear.sizeHint().width()
+    assert win.cb_auto_scroll.width() == win.cb_auto_scroll.sizeHint().width()
+    assert win.btn_open_file.width() == win.btn_open_file.sizeHint().width()
+    # 右侧内容溢出窗口边缘：截断而非隐藏（最右键超出窗口宽度）
+    assert (win.btn_expand.mapTo(win, win.btn_expand.rect().topLeft()).x()
+            + win.btn_expand.width() > 340)
+    win.resize(1000, 620)                         # 展宽恢复
     for _ in range(5):
         app.processEvents()
     assert win.send_edit.isVisible() and win.sb_link.isVisible()
@@ -1508,7 +1517,7 @@ def test_narrow_hides_find_bar(tmp_path):
     win.show()
     for _ in range(3):
         app.processEvents()
-    win.resize(900, 620)
+    win.resize(1000, 620)
     for _ in range(3):
         app.processEvents()
     win.find_bar.activate()
@@ -1517,7 +1526,7 @@ def test_narrow_hides_find_bar(tmp_path):
     for _ in range(5):
         app.processEvents()
     assert not win.find_bar.isVisible()
-    win.resize(900, 620)                     # 展宽 → 恢复原打开状态
+    win.resize(1000, 620)                     # 展宽 → 恢复原打开状态
     for _ in range(5):
         app.processEvents()
     assert win.find_bar.isVisible()
@@ -1987,11 +1996,52 @@ def test_tcp_v6_loopback_and_v4_isolation(tmp_path):
 
 
 # ---- TCP 客户端"本机 IP"真实生效：连接前预绑定（十九轮 F1，历史遗留）----
-def test_tcp_client_binds_local_ip(tmp_path):
-    """TcpClientLink 此前从不绑定 local_ip，"本机 IP"下拉形同虚设（UI 可选、
-    describe() 照显示、文档称三模式共用）。现在 open() 前按所选地址预绑定：
-    具体地址=限定源地址；0.0.0.0 / ::=限定协议族（与其余两模式同语义）；
-    绑定不可能的地址（本机未配置）→ 立即报"绑定失败"，不再假装生效。"""
+def test_tcp_client_binds_local_ip(tmp_path, monkeypatch):
+    """TcpClientLink 按所选本机地址的处理（十九轮 F1 引入预绑定、二十轮 F1 收口）：
+    仅"具体网卡地址"才预绑定（限定源地址/出口网卡）；"全部"档（0.0.0.0/::）、
+    回环与未配置一律不绑——源与协议族交回 Qt 由目标地址决定，主机名保留
+    多地址回退（出厂默认 127.0.0.1 预绑定会钉死源，连局域网设备直接报
+    Network unreachable）。绑定不可能的地址（本机未配置）→ 立即报"绑定失败"。"""
+    import app.core.net_link as nl
+    from PySide2.QtNetwork import QTcpSocket
+
+    binds, dials = [], []
+
+    class _SpySock(QTcpSocket):
+        def bind(self, *a):
+            binds.append(a[0].toString() if a else "?")
+            return True
+
+        def connectToHost(self, name, port, *a):
+            dials.append((name, port))
+
+    monkeypatch.setattr(nl, "QTcpSocket", _SpySock)
+    for no_bind in ("0.0.0.0", "::", "127.0.0.1", "::1", ""):
+        binds.clear()
+        dials.clear()
+        c = nl.TcpClientLink({"remote_ip": "1.2.3.4", "remote_port": "80",
+                              "local_ip": no_bind})
+        c.open()
+        assert binds == [], "local_ip=%r 不应预绑定" % no_bind
+        assert dials and dials[0][0] == "1.2.3.4", dials
+        c.close()
+    binds.clear()
+    c = nl.TcpClientLink({"remote_ip": "1.2.3.4", "remote_port": "80",
+                          "local_ip": "198.51.100.7"})
+    c.open()
+    assert binds == ["198.51.100.7"], "具体网卡地址应预绑定"
+    c.close()
+    # describe() 与绑定判据同口径：不绑档显示"自动（随目标）"，
+    # 具体网卡地址照常显示（二十一轮 F4）
+    assert "自动" in nl.TcpClientLink({"remote_ip": "1.2.3.4", "remote_port": "80",
+                                       "local_ip": "0.0.0.0"}).describe()
+    assert "自动" in nl.TcpClientLink({"remote_ip": "1.2.3.4", "remote_port": "80",
+                                       "local_ip": "127.0.0.1"}).describe()
+    assert "198.51.100.7" in nl.TcpClientLink({"remote_ip": "1.2.3.4",
+                                               "remote_port": "80",
+                                               "local_ip": "198.51.100.7"}).describe()
+    monkeypatch.undo()               # 以下端到端用例换回真实 QTcpSocket
+
     from app.core.net_link import TcpClientLink, TcpServerLink
     srv = TcpServerLink({"local_ip": "127.0.0.1", "local_port": 0})
     assert srv.open()
@@ -2000,7 +2050,7 @@ def test_tcp_client_binds_local_ip(tmp_path):
     srv.rx.connect(got.extend)
     c = TcpClientLink({"remote_ip": "127.0.0.1", "remote_port": str(port),
                        "local_ip": "127.0.0.1"})
-    assert c.open() is False                     # 异步连接
+    assert c.open() is False                     # 异步连接（回环不预绑定，Qt 自行连通）
     for _ in range(100):
         app.processEvents()
         if c.is_open():
@@ -2011,11 +2061,11 @@ def test_tcp_client_binds_local_ip(tmp_path):
         app.processEvents()
         if got:
             break
-    assert bytes(got) == b"hi", "绑定后应真实互通"
+    assert bytes(got) == b"hi", "应真实互通"
     c.close()
     srv.close()
 
-    # 本机未配置的地址 → bind 立即失败并报错（此前被静默忽略、照样连上）
+    # 本机未配置的具体地址 → bind 立即失败并报错（此前被静默忽略、照样连上）
     c2 = TcpClientLink({"remote_ip": "127.0.0.1", "remote_port": str(port),
                         "local_ip": "198.51.100.7"})       # TEST-NET-2，不可绑定
     states = []
@@ -2028,7 +2078,9 @@ def test_tcp_client_binds_local_ip(tmp_path):
     assert not c2.is_open()
     assert any("绑定失败" in s for s in states), states
 
-    # 单栈一致性：绑 0.0.0.0（仅 IPv4）时 IPv6 远程连不上；绑 :: 才能连上
+    # 单栈语义收口（二十轮 F1）：TCP 客户端的"全部"档不再预绑定——族由目标
+    # 地址决定（0.0.0.0 也能连上 IPv6 服务端）；互斥语义只保留在 UDP/服务端
+    # 的 listen 绑定上（各自用例覆盖）
     from PySide2.QtNetwork import QAbstractSocket
     srv6 = TcpServerLink({"local_ip": "::1", "local_port": 0})
     assert srv6.open()
@@ -2036,21 +2088,12 @@ def test_tcp_client_binds_local_ip(tmp_path):
     c4 = TcpClientLink({"remote_ip": "::1", "remote_port": str(port6),
                         "local_ip": "0.0.0.0"})
     c4.open()
-    for _ in range(50):
-        app.processEvents()
-        if c4.sock.state() == QAbstractSocket.UnconnectedState:
-            break
-    assert not c4.is_open(), "绑 IPv4 全部地址不允许连上 IPv6 服务端（单栈）"
-    c6 = TcpClientLink({"remote_ip": "::1", "remote_port": str(port6),
-                        "local_ip": "::"})
-    c6.open()
     for _ in range(100):
         app.processEvents()
-        if c6.is_open():
+        if c4.is_open():
             break
-    assert c6.is_open(), "绑 :: 应能连上 IPv6 服务端"
+    assert c4.is_open(), "全部档不绑定：族由目标地址决定，IPv4 全部也能连 IPv6 服务端"
     c4.close()
-    c6.close()
     srv6.close()
 
 
@@ -2368,6 +2411,81 @@ def test_calculator_c_array_field():
     assert w.c_array.toPlainText() == "0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12"
     w._recompute(w._from_dec, "十进制 DEC", "65")     # 任意字段联动同步
     assert w.c_array.toPlainText() == "0x41"
+
+
+# ---- 启动期串口枚举只做一次（启动性能分析_20261021 §4.1）----
+def test_startup_does_not_reenumerate_ports(tmp_path, monkeypatch):
+    """端口列表在 _apply_settings 里已枚举；_startup 只做列宽校正——慢驱动
+    机器上一次 availablePorts() 可达数秒，启动路径不重复做。"""
+    win = MainWindow(Settings(str(tmp_path / "norefresh.json")))
+    calls = []
+    monkeypatch.setattr(win, "_refresh_ports",
+                        lambda select=None: calls.append(select))
+    win._startup()
+    assert calls == []                       # 不再重复枚举
+    assert win.serial_box.width() > 0        # 列宽校正仍执行
+    assert win.net_box.width() == win.serial_box.width()
+
+
+# ---- 工具行"新窗口"：单击启动新实例（V0.0.4，2026-10-22 移入工具行）----
+def test_new_window_action_launches_instance(tmp_path, monkeypatch):
+    import app.ui.mainwindow as mw_mod
+
+    win = MainWindow(Settings(str(tmp_path / "newwin.json")))
+    win.show()
+    for _ in range(3):
+        app.processEvents()
+    assert not [a for a in win.menuBar().actions()
+                if a.text() == "新窗口"], "新窗口已移出菜单栏"
+    # 工具行：清除窗口 查找 新窗口（打开文件之前）——顺序由布局插入序保证
+    assert win.btn_new_window.text() == "新窗口"
+    calls = []
+
+    def fake_detach(exe, args, cwd=None):
+        calls.append((exe, args, cwd))
+        return True
+
+    monkeypatch.setattr(mw_mod.QProcess, "startDetached", fake_detach)
+    win.btn_new_window.click()
+    assert calls and calls[0][0], "应拉起新实例进程"
+    assert not win.sb_link.text().startswith("新窗口启动失败")
+    # 文件块起始横坐标 = 左下角"发送"按钮右缘（垫片定宽，_startup 实测计算；
+    # 精确值依赖运行时布局，真机探针已验证；离屏布局冻结不断言应用宽度）
+    assert win._file_pad > 0
+
+
+# ---- 工具行与 HEX 行对齐 + 小工具菜单（文件资源管理器/扩展页入口）----
+def test_tools_menu_explorer_and_ext_pages(tmp_path, monkeypatch):
+    import app.ui.mainwindow as mw_mod
+
+    win = MainWindow(Settings(str(tmp_path / "tools.json")))
+    win.show()
+    for _ in range(3):
+        app.processEvents()
+    # 小工具菜单两组：扩展页直达（进制转换/ASCII码表/多条字符串发送）
+    # + 外部工具（计算器/设备管理器/文件资源管理器）
+    from PySide2.QtWidgets import QMenu as _QMenu
+    tool_menu = [m for m in win.findChildren(_QMenu) if m.title() == "小工具"][0]
+    texts = [a.text() for a in tool_menu.actions() if a.text()]
+    assert {"进制转换", "ASCII码表", "多条字符串发送",
+            "计算器", "设备管理器", "文件资源管理器"} <= set(texts)
+    # 菜单→处理器接线：触发"进制转换"后自动展开扩展面板并切到该页
+    # （菜单动作取到后立即触发，避免 PySide2 菜单 GC 坑）
+    win.btn_expand.setChecked(False)
+    win._toggle_expand(False)
+    for a in tool_menu.actions():
+        if a.text() == "进制转换":
+            a.trigger()
+            break
+    assert win.btn_expand.isChecked() and win.tabs.currentIndex() == 1
+    # 其余入口直调处理器（句柄级验证，不依赖菜单对象存活）
+    win._show_ext_tab(2)
+    assert win.tabs.currentIndex() == 2
+    called = []
+    monkeypatch.setattr(mw_mod.os, "startfile",
+                        lambda path: called.append(path))
+    win._open_explorer()
+    assert called and "20D04FE0" in called[0]      # 我的电脑 CLSID
 
 
 # ---- 多条发送表格深色：原生样式直绘部位改主题手绘（2026-10-20 用户反馈白块）----

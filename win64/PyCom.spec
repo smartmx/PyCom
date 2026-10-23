@@ -80,7 +80,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,               # 显式关闭：UPX 壳会拖慢启动并显著提高杀软
+                             # 启发式误报率（启动性能分析_20261021 §4.2）
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

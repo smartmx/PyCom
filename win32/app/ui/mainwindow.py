@@ -17,7 +17,7 @@ import time
 import weakref
 from functools import partial
 
-from PySide2.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, QUrl
+from PySide2.QtCore import QEvent, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, QUrl
 from PySide2.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, \
     QIntValidator, QKeySequence, QPainter, QPalette, QPen
 from PySide2.QtWidgets import (QAbstractSpinBox, QActionGroup, QApplication,
@@ -146,7 +146,19 @@ BUF_SIZES = [("500K", 500_000), ("1M", 1_048_576),
 _MAX_BUF = BUF_CAP_MAX
 _MIN_BUF = 500_000
 # 窄窗阈值：宽度小于此值隐藏右侧发送/选项区（对齐 SSCOM 向左缩到只剩配置框）
-_NARROW_W = 620
+_NARROW_W = 920   # 窄窗阈值：与文件块阈值一致（<920 只留串口面板+接收区，
+                   # 620~920 的宽度塞不下完整宽布局，列间会互相入侵）
+
+
+class ClipBox(QWidget):
+    """SSCOM 式截断容器：对父布局贡献的最小**宽度**恒为 0，内部控件保持自然
+    宽度不被压缩；窗口缩窄时内部内容整体向右溢出、被窗口边缘直接裁掉
+    （不隐藏）——对齐原版缩窗行为。前提：内部非伸缩控件已钉住自然宽度。
+    高度保持自然最小值：只做横向截断，高度归零会把所在网格行压扁
+    （V0.0.4 实测回归：选项两列被挤扁、发送输入框长高）。"""
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
 
 
 class MainWindow(QMainWindow):
@@ -154,7 +166,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.cfg = settings
         self.setWindowTitle("PyCom32 串口/网络数据调试器")
-        # 允许向左缩到串口配置框宽度（窄窗时右侧内容由 _apply_narrow 隐藏）
+        # 允许向左缩到串口配置框宽度（窄窗时右侧内容被窗口边缘截断，不隐藏）
         self.setMinimumWidth(330)
         self.menuBar().setNativeMenuBar(False)   # 深色 QSS 才能作用于顶部菜单
         self._mode = self.cfg.d["mode"]
@@ -230,7 +242,7 @@ class MainWindow(QMainWindow):
         mv.addLayout(ms_row)
         self.tabs.addTab(ms_w, "多条字符串发送")
         from app.ui.calculator_dlg import CalculatorWidget
-        self.tabs.addTab(CalculatorWidget(), "转换计算器")   # 多字符串发送与ASCII码表之间
+        self.tabs.addTab(CalculatorWidget(), "进制转换")   # 多字符串发送与ASCII码表之间
         self.tabs.addTab(self._build_ascii_table(), "ASCII码表")
         self.splitter.addWidget(right)
         # 原版比例：接收 Memo 357 : 多条发送 418 ≈ 46:54
@@ -251,14 +263,18 @@ class MainWindow(QMainWindow):
         row5.setSpacing(3)
         self.btn_clear = QPushButton("清除窗口")
         self.btn_find = QPushButton("查找")
+        self.btn_new_window = QPushButton("新窗口")
+        self.btn_new_window.setToolTip("再启动一个独立的应用实例")
+        self.cb_auto_scroll = QCheckBox("自动滚屏")
+        self.cb_auto_scroll.setToolTip("关闭后新数据只入缓冲，接收区停在当前位置")
+        self.spacer_file = QWidget()   # 文件块对齐垫片（_startup 实测定宽）
+        self._file_pad = 0             # 垫片上限（须先于首个 resizeEvent 存在）
         self.btn_open_file = QPushButton("打开文件")
         self.edit_file = QLineEdit()
         self.edit_file.setPlaceholderText("发送文件路径")
         self.btn_send_file = QPushButton("发送文件")
         self.btn_stop_file = QPushButton("停止")
         self.btn_clear_send = QPushButton("清发送区")
-        self.cb_auto_scroll = QCheckBox("自动滚屏")
-        self.cb_auto_scroll.setToolTip("关闭后新数据只入缓冲，接收区停在当前位置")
         self.btn_collapse = QPushButton("收起")
         self.btn_collapse.setCheckable(True)
         self.btn_collapse.setToolTip("收起/展开底部串口参数面板")
@@ -267,15 +283,26 @@ class MainWindow(QMainWindow):
         self.btn_save_params = QPushButton("保存参数")
         self.btn_expand = QPushButton("扩展")
         self.btn_expand.setCheckable(True)
-        for w in (self.btn_clear, self.btn_find, self.btn_open_file, self.edit_file,
+        for w in (self.btn_clear, self.btn_find, self.btn_new_window):
+            row5.addWidget(w)
+        row5.addSpacing(16)               # 与"自动滚屏"间隔一个汉字宽
+        row5.addWidget(self.cb_auto_scroll)
+        # 右侧可截断区（SSCOM 式缩窗）：文件块与右侧按钮保持自然宽度，
+        # 缩窗时整区向右溢出、被窗口边缘裁掉，左侧各键永不压缩
+        self.tool_right = ClipBox()
+        tr = QHBoxLayout(self.tool_right)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.setSpacing(3)
+        for w in (self.spacer_file, self.btn_open_file, self.edit_file,
                   self.btn_send_file, self.btn_stop_file,
                   self.btn_clear_send):
-            row5.addWidget(w)
-        row5.setStretchFactor(self.edit_file, 1)
-        row5.addStretch(1)
-        for w in (self.cb_auto_scroll, self.btn_collapse, self.btn_keep_top,
+            tr.addWidget(w)
+        tr.setStretchFactor(self.edit_file, 1)
+        tr.addStretch(1)
+        for w in (self.btn_collapse, self.btn_keep_top,
                   self.btn_save_params, self.btn_expand):
-            row5.addWidget(w)
+            tr.addWidget(w)
+        row5.addWidget(self.tool_right, 1)
         root.addLayout(row5)
 
         # ---------- 进度条（原 ProgressBar1） ----------
@@ -476,7 +503,14 @@ class MainWindow(QMainWindow):
         p8r2.addStretch(1)
         p8.addLayout(p8r2)
         p8.addStretch(1)        # 选项行贴顶，剩余高度让给发送输入框
-        g.addLayout(p8, 0, 1)
+        # 两列选项同包一个可截断容器：缩窗时保持各自宽度、被窗口边缘裁掉
+        # （对齐 SSCOM 窄窗下 HEX显示/加时间戳 被截半的样子），不再整列隐藏
+        self.opt_box = ClipBox()
+        ob = QHBoxLayout(self.opt_box)
+        ob.setContentsMargins(0, 0, 0, 0)
+        ob.setSpacing(6)
+        ob.addLayout(p8)
+        g.addWidget(self.opt_box, 0, 1, 1, 3)   # 跨 1~3 列：右缘与发送编辑框对齐
 
         # 列2（原 Panel9）：发送选项
         p9 = QVBoxLayout()
@@ -533,14 +567,16 @@ class MainWindow(QMainWindow):
         p9r2.addStretch(1)
         p9.addLayout(p9r2)
         p9.addStretch(1)        # 同上：校验行贴顶
-        g.addLayout(p9, 0, 2)
+        ob.addStretch(1)        # 左右两组撑开：接收选项靠左、发送选项贴右（V0.0.3 观感）
+        ob.addLayout(p9)
 
         # 多行发送编辑框（原 Edit_Data 550x56，右侧留白对齐原版）
         self.send_edit = QPlainTextEdit()
         self.send_edit.setPlaceholderText("发送内容（HEX 格式如: 01 02 FF），Ctrl+Enter 发送")
         self.send_edit.setMinimumHeight(90)   # 加高输入框（吸收底部面板剩余高度）
-        g.addWidget(self.send_edit, 1, 1, 1, 2)
-        # 窄窗模式（对齐 SSCOM）需要整体隐藏的右侧控件：选项两列 + 发送输入框
+        g.addWidget(self.send_edit, 1, 1, 1, 3)   # 跨 1~3 列：多余宽度全归编辑框，右缘贴窗口边（V0.0.3 观感）
+        # 选项区控件清单：[0] 是发送输入框（保持可伸缩），其余在启动沉降时
+        # 钉住自然宽度——缩窗时随 opt_box 整体被窗口边缘截断而不压缩
         self._opt_widgets: list = [self.send_edit]
         for _lay in (p8r1, p8r2, p9r1, p9r2):
             for _i in range(_lay.count()):
@@ -551,8 +587,7 @@ class MainWindow(QMainWindow):
         g.setColumnStretch(0, 0)
         g.setColumnStretch(1, 1)
         g.setColumnStretch(2, 0)
-        g.addWidget(QWidget(), 0, 3, 2, 1)
-        g.setColumnStretch(3, 1)      # 右侧留白列，防止编辑框贴到窗口边缘
+        g.setColumnStretch(3, 1)      # 发送编辑框跨到本列（行 1）：右缘贴窗口边
         # 数字输入框：隐藏上下按钮，宽度限制在 5 位数字左右。
         # IME 数字模式：数字直上屏、防中文输入法候选窗拦截（已在真实桌面验证不影响键盘输入）。
         for sb in (self.sp_split_ms, self.sp_timed, self.sp_chk_start):
@@ -695,8 +730,17 @@ class MainWindow(QMainWindow):
         m_send.addAction("帮助").triggered.connect(self._term_help)
 
         m_tool = mb.addMenu("小工具")
+        # 上组：扩展区页签直达；下组：外部工具
+        m_tool.addAction("进制转换").triggered.connect(
+            lambda: self._show_ext_tab(1))
+        m_tool.addAction("ASCII码表").triggered.connect(
+            lambda: self._show_ext_tab(2))
+        m_tool.addAction("多条字符串发送").triggered.connect(
+            lambda: self._show_ext_tab(0))
+        m_tool.addSeparator()
         m_tool.addAction("计算器").triggered.connect(self._open_calc)
         m_tool.addAction("设备管理器").triggered.connect(self._open_devmgr)
+        m_tool.addAction("文件资源管理器").triggered.connect(self._open_explorer)
 
         m_help = mb.addMenu("帮助")
         self.act_check_update = m_help.addAction("检查更新…")
@@ -933,6 +977,7 @@ class MainWindow(QMainWindow):
         self.rxview.save_bin_hook = self._save_rx     # 右键保存原始字节走统一落盘逻辑
         self.btn_clear.clicked.connect(self._clear_display)
         self.btn_find.clicked.connect(self.find_bar.activate)
+        self.btn_new_window.clicked.connect(self._open_new_window)
         self.btn_clear_send.clicked.connect(self.send_edit.clear)
         self.btn_save.clicked.connect(lambda: self._save_rx())
         self.cb_rxfile.toggled.connect(self._toggle_rxfile)
@@ -1116,8 +1161,8 @@ class MainWindow(QMainWindow):
         self.act_term_echo.setEnabled(self.act_term_key.isChecked())
 
     def _startup(self):
-        # 必须带 select：否则端口下拉被重置到第一项
-        self._refresh_ports(select=self.cfg.d["port"])
+        # 端口列表已在 _apply_settings 里枚举过（慢驱动机器上枚举可达数秒，
+        # 启动路径不重复做，见 启动性能分析_20261021）；此处只做列宽校正——
         # 列宽以串口配置各行实际需要的宽度为准（取"线路"行与整箱 sizeHint
         # 的较大值）：波特率/数据位等是固定宽控件，字体度量偏大时行宽会超
         # 过"线路"行，此时跟随较大值——保证行与行之间绝不重叠；
@@ -1131,6 +1176,11 @@ class MainWindow(QMainWindow):
         self.serial_box.setFixedWidth(w)
         self.net_box.setFixedWidth(w)
         self.btn_send.setFixedWidth(w)
+        # 文件块（打开文件/路径/发送文件/停止/清发送区）右移：起始横坐标
+        # 对齐左下角"发送"按钮的右缘（用户要求）。字体度量异步沉降（启动早期
+        # 偏小），分多拍重算（每拍整体重设、非累积），沉降后自动收敛
+        for d in (0, 300, 1000, 2500):
+            QTimer.singleShot(d, self._update_file_pad)
         # 菜单"启动立刻打开串口"勾选时自动打开（默认不勾选）
         if self.cfg.d["open_on_start"]:
             self._open_link()
@@ -1191,23 +1241,20 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._apply_narrow(self.width() < _NARROW_W)
+        self._apply_file_pad()
 
     def _apply_narrow(self, on: bool):
-        """窄窗模式（对齐 SSCOM）：窗口向左缩到串口配置框宽度时，隐藏发送输入框、
-        选项列、部分工具按钮与扩展面板，只保留接收显示 + 配置列 + 收发计数。"""
+        """窄窗（对齐 SSCOM）：右侧控件不再隐藏——工具行右区与选项两列保持
+        自然宽度、被窗口边缘截断（ClipBox 溢出）；此处只处理无法截断的浮层
+        与停靠件：扩展面板收起、查找条隐藏、状态栏连接信息让位。"""
         if not getattr(self, "_ui_ready", False):
             return
         if getattr(self, "_narrow", None) == on:
             return
         self._narrow = on
-        for w in self._opt_widgets:               # 选项两列 + 发送输入框
-            w.setVisible(not on)
-        for w in (self.btn_send_file, self.btn_stop_file, self.btn_clear_send,
-                  self.cb_auto_scroll, self.btn_collapse, self.btn_keep_top,
-                  self.btn_save_params, self.btn_expand, self.sb_link):
-            w.setVisible(not on)
         # 扩展面板：窄窗隐藏；展宽后按扩展按钮原状态恢复
         self.splitter.widget(1).setVisible(self.btn_expand.isChecked() and not on)
+        self.sb_link.setVisible(not on)
         # 查找条在窄窗下会被挤到不可用宽度：窄窗隐藏，展宽后按原状态恢复
         if on:
             if self.find_bar.isVisible():
@@ -1406,6 +1453,16 @@ class MainWindow(QMainWindow):
         （第1框通知栏只显示 已连接/未连接，其余提示一律走这里）。"""
         self.sb_link.setText(msg)
         self._sb_notice.start(timeout)        # 单次定时器，重复 start 即刷新
+
+    def _open_new_window(self):
+        """菜单栏最左"新窗口"：再启动一个独立的应用实例（QProcess 脱离本进程
+        独立运行；同一串口/端口资源仍由系统互斥，两边开同一串口会走占用提示）。
+        打包版拉起 exe 自身；源码模式带 main.py 路径。"""
+        args = []
+        if not getattr(sys, "frozen", False):
+            args = [os.path.abspath(sys.argv[0])]   # 源码：python main.py
+        if not QProcess.startDetached(sys.executable, args, base_dir()):
+            self._notify("新窗口启动失败")
 
     def _on_state(self, state: str):
         # 通知栏（第1框）只显示 已连接/未连接；连接细节与其余提示走第4框
@@ -2157,6 +2214,49 @@ class MainWindow(QMainWindow):
             self._notify("已打开系统计算器", 2000)
         except OSError as ex:
             QMessageBox.warning(self, "计算器", "无法打开: %s" % ex)
+
+    def _open_explorer(self):
+        """打开 Windows 文件资源管理器，默认定位"此电脑"（我的电脑）。"""
+        try:
+            os.startfile("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
+        except OSError as ex:
+            self._notify("无法打开文件资源管理器: %s" % ex)
+
+    def _fix_natural_widths(self):
+        """把工具行左组、文件块固定键、右侧四键与选项行控件钉在自然宽度
+        （SSCOM 式截断的前提：这些控件永不压缩，缩窗时由 ClipBox 溢出裁剪）。
+        字体度量异步沉降，故与垫片同拍重钉、整体重设、非累积，沉降后收敛。"""
+        for w in (self.btn_clear, self.btn_find, self.btn_new_window,
+                  self.cb_auto_scroll, self.btn_open_file, self.btn_send_file,
+                  self.btn_stop_file, self.btn_clear_send, self.btn_collapse,
+                  self.btn_keep_top, self.btn_save_params, self.btn_expand):
+            w.setFixedWidth(w.sizeHint().width())
+        for w in self._opt_widgets[1:]:   # [0] 是发送输入框（保持可伸缩）
+            w.setFixedWidth(min(w.sizeHint().width(), w.maximumWidth()))
+
+    def _update_file_pad(self):
+        """重算并应用文件块垫片：文件块起始横坐标 = 左下角"发送"按钮的右缘。
+        用已渲染控件的真实坐标做差（垫片左侧的控件位置与垫片值无关，可安全
+        实测）；"自动滚屏"在新窗口右侧，其宽度与行间距必须一并计入。
+        每拍整体重设、非累积。"""
+        self._fix_natural_widths()
+        x_of = lambda wgt: wgt.mapTo(self, wgt.rect().topLeft()).x()
+        target = x_of(self.btn_send) + self.btn_send.width()      # 发送按钮右缘
+        pre = x_of(self.cb_auto_scroll) + self.cb_auto_scroll.width()
+        self._file_pad = max(0, target - pre - 2 * 3)  # 2 处行间距：滚屏→垫片、垫片→打开文件
+        self._apply_file_pad()
+
+    def _apply_file_pad(self):
+        """应用垫片（用户要求：文件块起始横坐标恒定 = 左下角"发送"按钮的
+        右缘，任何窗口宽度都显示并对齐；窗口极窄时路径框/右侧按钮自然裁剪）。"""
+        self.spacer_file.setFixedWidth(self._file_pad)
+
+    def _show_ext_tab(self, idx: int):
+        """展开扩展面板并切到指定页（0=多条字符串发送 1=转换计算器 2=ASCII码表）。"""
+        if not self.btn_expand.isChecked():
+            self.btn_expand.setChecked(True)
+            self._toggle_expand(True)
+        self.tabs.setCurrentIndex(idx)
 
     def _open_devmgr(self):
         try:

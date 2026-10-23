@@ -3,14 +3,28 @@
 
 IPv4/IPv6 纯单栈语义：本地绑定地址是哪个族就只收发哪个族（0.0.0.0=仅 IPv4
 全部、::=仅 IPv6 全部、具体地址=仅该地址，链路本地 fe80::x%作用域 直接可用），
-不做双栈。TCP 客户端连接前按所选本机地址预绑定（限定源网卡与协议族），族由
-绑定与远程地址共同决定。"""
+不做双栈。TCP 客户端仅当选了"具体网卡地址"才预绑定（限定源地址/出口网卡）；
+"全部"档、回环与未配置一律不绑——源地址与协议族由目标地址决定，主机名保留
+多地址回退（二十轮 F1：预绑定回环会把源钉死，连局域网设备报
+Network unreachable，且主机名失去 v4/v6 回退）。"""
 from __future__ import annotations
 
 from PySide6.QtNetwork import (QTcpServer, QTcpSocket, QAbstractSocket,
                                QUdpSocket, QHostAddress)
 
 from .link import Link
+
+
+def _bindable_local(cfg: dict) -> QHostAddress:
+    """TCP 客户端本机绑定决策（二十轮 F1）：仅"具体网卡地址"返回该地址；
+    "全部"档（0.0.0.0/::）、回环与未配置返回 null——不预绑定，源地址与协议族
+    随目标而定。open() 与 describe() 共用同一判据，避免两处口径漂移
+    （二十一轮 F4：不绑定的档位状态栏不应显示一个并未使用的地址）。"""
+    a = QHostAddress(cfg.get("local_ip") or "")
+    if (a.isNull() or a.isLoopback()
+            or a == QHostAddress.AnyIPv4 or a == QHostAddress.AnyIPv6):
+        return QHostAddress()
+    return a
 
 
 def _strip_brackets(host: str) -> str:
@@ -42,18 +56,19 @@ class TcpClientLink(Link):
         if self.sock.state() == QAbstractSocket.ConnectedState:
             return True
         self.sock.abort()       # 回到未绑定态，防重连路径上重复 bind 失败
-        # 按所选本机地址预绑定（此前从不绑定，"本机 IP"下拉形同虚设——十九轮
-        # F1）：具体地址=限定源地址/出口网卡；0.0.0.0 / ::=限定协议族，与其余
-        # 两模式同语义。端口 0=系统分配临时端口（TCP 客户端无需配置本机端口）。
-        local = QHostAddress(self.cfg.get("local_ip") or QHostAddress.AnyIPv4)
-        if local.isNull():
-            local = QHostAddress(QHostAddress.AnyIPv4)
-        if not self.sock.bind(local, 0):
-            self.state_changed.emit("error: 本机IP绑定失败(%s)"
-                                    % self.sock.errorString())
-            self._schedule()
-            return False
-        # IPv4/IPv6 字面量与主机名（含 AAAA）都交给 Qt 解析；族由绑定+远程决定
+        # 仅当选了"具体网卡地址"才预绑定（限定源地址/出口网卡——十九轮 F1）。
+        # "全部"档（0.0.0.0/::）、回环与未配置一律不绑：源与协议族交回 Qt 由
+        # 目标地址决定，主机名保留多地址回退——出厂默认 local_ip=127.0.0.1
+        # 预绑定会把源钉死回环，连局域网设备报 Network unreachable
+        # （二十轮 F1 实测）。端口 0=系统分配临时端口。
+        local = _bindable_local(self.cfg)
+        if not local.isNull():
+            if not self.sock.bind(local, 0):
+                self.state_changed.emit("error: 本机IP绑定失败(%s)"
+                                        % self.sock.errorString())
+                self._schedule()
+                return False
+        # IPv4/IPv6 字面量与主机名（含 AAAA）都交给 Qt 解析
         self.sock.connectToHost(_strip_brackets(self.cfg["remote_ip"]),
                                 int(self.cfg["remote_port"]))
         return False        # 异步连接，结果经信号通知
@@ -95,9 +110,10 @@ class TcpClientLink(Link):
         return self.sock.state() == QAbstractSocket.ConnectedState
 
     def describe(self) -> str:
+        local = _bindable_local(self.cfg)
+        lip = local.toString() if not local.isNull() else "自动（随目标）"
         return ("TCPClient 本机IP=%s → %s:%s"
-                % (self.cfg.get("local_ip", "127.0.0.1"),
-                   self.cfg["remote_ip"], self.cfg["remote_port"]))
+                % (lip, self.cfg["remote_ip"], self.cfg["remote_port"]))
 
 
 class TcpServerLink(Link):

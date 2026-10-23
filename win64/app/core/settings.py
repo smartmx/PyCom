@@ -54,7 +54,8 @@ DEFAULTS = {
     "open_on_start": False,     # 启动立刻打开串口（默认不勾选）
     "remote_ip": "127.0.0.1",
     "remote_port": 8080,
-    "local_ip": "127.0.0.1",
+    "local_ip": "0.0.0.0",    # 全部 IPv4（二十轮 F1：出厂默认不可为回环——
+                              # TCP 客户端预绑定/UDP·服务端 listen 都会被钉在回环）
     "local_port": 777,
     # 显示
     "encoding": "gbk",
