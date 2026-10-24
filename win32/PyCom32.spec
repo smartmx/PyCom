@@ -1,7 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Win7 32 位回迁版（Python 3.8 + PySide2/Qt5 + PyInstaller 5.13.2）。
-# 产物：dist/PyCom32.exe —— **只出单文件便携版**（规则：不再打包目录版）；
-# 单个 exe 拷到目标机即可运行，启动时解包到系统临时目录，启动稍慢。
+# Win7 32 位回迁版（Python 3.8 + PySide2/Qt5 + PyInstaller 6.22.2，与主线
+# 同版本——2026-10-24 打包指令起由 5.13.2 升级，目录版获得与主线一致的
+# exe + _internal/ 布局）。
+# 一次构建两个产物（共用同一份 Analysis，2026-10-24 打包指令恢复双产物）：
+#   dist/PyCom32/PyCom32.exe   目录版（免解压：exe + _internal/ 文件夹，
+#                               DLL 与 Win7 专用 UCRT 全在 _internal/ 里，
+#                               整文件夹拷贝、启动零解包，结构对齐主线）
+#   dist/PyCom32.exe           单文件版（便携：单 exe，启动自解包，稍慢）
 import os
 import sys
 
@@ -48,10 +53,10 @@ binaries += [(os.path.join(_UCRT_DIR, f), ".")
 # ---- 体积裁剪（Qt5 版）:纯 QWidgets 应用用不到的重型 Qt 组件整包剔除 ----
 # PySide2 完整 wheel 带全量 Qt5 模块（QML/Quick、3D、WebEngine、多媒体、定位等），
 # 我们只用 Widgets 光栅绘制 + QtSerialPort + QtNetwork(TCP/UDP) + QtSvg。
-# 注意与 Qt6 版的两点差异：
-#   1. UCRT 必须随包，且要用上面那份 Win7 版（Qt6 版面向 Win10+ 才剔）；
-#   2. PyInstaller 5.x 的目录版产物没有 _internal/ 子目录，全部文件平铺在
-#      dist/PyCom/ 下。
+# 注意与 Qt6 版的一点差异：
+#   UCRT 必须随包，且要用上面那份 Win7 版（Qt6 版面向 Win10+、反而剔除 UCRT）。
+# 目录版布局自 PyInstaller 6.x 起与主线一致：exe 在 dist/PyCom32/ 根、
+# 其余（DLL/UCRT/PySide2）全在 dist/PyCom32/_internal/ 里。
 # UPX 未安装时 DLL 本身无法再压缩，剔除列表是主要杠杆。
 _DROP_DLL_EXACT = {
     "opengl32sw.dll",          # 20MB 软件 OpenGL（Widgets 用光栅，不请求 GL）
@@ -135,8 +140,38 @@ a.binaries = [e for e in a.binaries if _keep(e)]
 a.datas = [e for e in a.datas if _keep(e)]
 pyz = PYZ(a.pure)
 
-# 只产出**单文件**便携版（规则：不再打包目录版）：
-# binaries/datas 全部内联进 exe，运行时解包到 sys._MEIPASS。
+# ---- 目录版（免解压：2026-10-24 打包指令恢复双产物）----
+# PyInstaller 6.x 目录版：exe 在 dist/PyCom32/ 根，DLL/资源（含 Win7 专用
+# UCRT）全在 dist/PyCom32/_internal/ 子目录里（与主线布局一致），启动零解包；
+# 分发时把 PyCom32.exe + _internal/ 整个文件夹一起拷贝。
+exe_dir = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='PyCom32',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['assets/pycom.ico'],
+)
+coll = COLLECT(
+    exe_dir,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='PyCom32',
+)
+
+# ---- 单文件版（便携：单个 exe 拷到哪都能跑，启动自解包到 %TEMP%）----
 exe = EXE(
     pyz,
     a.scripts,

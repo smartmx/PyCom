@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """PyCom32 Win7 打包审计（PE 级，纯 stdlib，3.8+/3.13 通用）。
 
-产物只有一个**单文件版** dist/PyCom32.exe（目录版已废弃），因此分两处审计：
+双产物三处审计（PyInstaller 6.x 起，目录版为 exe + _internal/ 布局）：
   A. 对 dist/PyCom32.exe：验证是 32 位程序、引导器导入可解析；
      注意——DLL 与 UCRT 都内嵌在 exe 的压缩归档里，PE 层看不到，
-     所以随包 UCRT 的"血统"要靠下面 B 对**打包输入**审计来把关。
-  B. 对 win7/vendor/ucrt-x86（打包时随包的 UCRT 来源）：验证 41 个文件都能被
+     所以随包 UCRT 的"血统"要靠下面 C 对**打包输入**审计来把关。
+  B. 对 dist/PyCom32（目录版）：遍历含 _internal/ 的整个文件夹——
+     必备文件与 UCRT 血统检查自动定位到 _internal/ 内容根。
+  C. 对 win7/vendor/ucrt-x86（打包时随包的 UCRT 来源）：验证 41 个文件都能被
      Win7 解析、且没有转发到 kernelbase 之类 Win8+ 组件。
 
 用法（退出码 0 = 无风险项，1 = 有风险项）：
     python tools\\audit_dist_win7.py                      # 默认审计 dist\\PyCom32.exe
     python tools\\audit_dist_win7.py dist\\PyCom32.exe     # 单文件产物
+    python tools\\audit_dist_win7.py dist\\PyCom32         # 目录版（自动进 _internal）
     python tools\\audit_dist_win7.py vendor\\ucrt-x86      # 打包输入：随包 UCRT
     python tools\\audit_dist_win7.py <某个目录>            # 任意"平铺 DLL 目录"
 """
@@ -186,11 +189,22 @@ def audit(root):
                 if n.lower().endswith(PE_EXT):
                     files.append(os.path.join(dirpath, n))
 
-    local = {os.path.basename(p).lower() for p in files}
-    if not single and os.path.isdir(root):
+    # PyInstaller 6.x 目录版：内容全在 _internal/ 子目录（exe 在根）——
+    # 必备文件/UCRT 检查以内容根为准；平铺布局（5.x/UCRT 输入目录）根即内容根
+    content = root
+    internal = os.path.join(root, "_internal")
+    if not single and os.path.isdir(internal):
+        content = internal
+        print("目录版布局：内容根 = %s" % os.path.relpath(content, root))
+    # 文件名 → 全路径映射（walk 覆盖整个 root，含 _internal/ 子目录）
+    name2path = {}
+    if not single:
         for dirpath, _dirs, names in os.walk(root):
             for n in names:
-                local.add(n.lower())
+                name2path.setdefault(n.lower(), os.path.join(dirpath, n))
+
+    local = {os.path.basename(p).lower() for p in files}
+    local.update(name2path)
 
     risks = []
     # 1) 位数
@@ -217,7 +231,7 @@ def audit(root):
     print("[2] 必备文件检查（打包踩坑清单）")
     if not single and not ucrt_only:
         for rel in REQUIRED_PRESENT:
-            ok = os.path.exists(os.path.join(root, rel))
+            ok = os.path.exists(os.path.join(content, rel))
             print("    %s %s" % ("✓" if ok else "✗", rel))
             if not ok:
                 risks.append("缺必备文件: " + rel)
@@ -245,7 +259,7 @@ def audit(root):
         for name in sorted(local):
             if not (name.startswith("api-ms-win-") or name == "ucrtbase.dll"):
                 continue
-            p = os.path.join(root, name)
+            p = name2path.get(name) or os.path.join(root, name)
             if not os.path.exists(p):
                 continue
             try:

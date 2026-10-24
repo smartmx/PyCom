@@ -1493,6 +1493,120 @@ def test_narrow_mode_clips_right_panel(tmp_path):
     assert win.send_edit.isVisible() and win.sb_link.isVisible()
 
 
+def test_shrink_freezes_canvas(tmp_path):
+    """V0.0.5：按钮类控件位置绝对恒定（收缩裁右边、拉宽右侧留空，均不移位）；
+    显示框/发送框跟随窗口伸缩。"""
+    win = MainWindow(Settings(str(tmp_path / "freeze.json")))
+    win.show()
+    QTest.qWait(2700)                  # 等启动沉降末拍(2500ms)走完，避免竞态重冻结
+    for _ in range(3):
+        app.processEvents()
+    win.resize(1250, 700)
+    for _ in range(3):
+        app.processEvents()
+    win._final_settle()
+    for _ in range(3):
+        app.processEvents()
+    m = lambda w: w.mapTo(win, w.rect().topLeft()).x()
+    x_open = m(win.btn_open_file)
+    x_collapse = m(win.btn_collapse)
+    x_expand = m(win.btn_expand)
+    x_chk = m(win.edit_checksum_view)
+    w_send = win.send_edit.width()
+    # 收缩：所有按钮原位，发送框/显示框跟随压缩
+    win.resize(1000, 700)
+    for _ in range(5):
+        app.processEvents()
+    assert m(win.btn_open_file) == x_open, "文件块不得移位"
+    assert m(win.btn_collapse) == x_collapse, "右侧按钮组不得移位"
+    assert m(win.btn_expand) == x_expand, "右侧按钮组不得移位"
+    assert m(win.edit_checksum_view) == x_chk, "选项组不得移位"
+    assert win.send_edit.width() < w_send, "发送框应跟随压缩"
+    assert win.rxview.width() == win.width() - 8, "显示框应跟随视口宽"
+    # 拉宽：所有按钮仍原位（右侧留空），发送框/显示框跟随变宽
+    win.resize(1500, 700)
+    for _ in range(5):
+        app.processEvents()
+    assert m(win.btn_collapse) == x_collapse and m(win.btn_expand) == x_expand, \
+        "拉宽时按钮组也不得移位"
+    assert m(win.btn_open_file) == x_open and m(win.edit_checksum_view) == x_chk
+    assert win.send_edit.width() > w_send, "发送框应跟随变宽"
+    assert win.rxview.width() == win.width() - 8, "显示框应跟随视口宽"
+
+
+def test_expand_panel_separate_window(tmp_path):
+    """V0.0.5：扩展面板是独立小窗——弹出后贴主窗右缘（右缘贴屏时自动
+    夹回屏幕内/改弹左侧），× 直接关闭同步主窗按钮；显示框与主界面布局
+    完全不受影响。"""
+    win = MainWindow(Settings(str(tmp_path / "expand.json")))
+    win.show()
+    QTest.qWait(2700)                  # 等启动沉降末拍(2500ms)走完，避免竞态重冻结
+    for _ in range(3):
+        app.processEvents()
+    win.resize(1250, 700)
+    for _ in range(3):
+        app.processEvents()
+    win._final_settle()
+    for _ in range(3):
+        app.processEvents()
+    w0 = win.rxview.width()
+    avail = win.screen().availableGeometry()
+
+    def in_screen():
+        return avail.left() <= win.right.x() <= avail.right() - win.right.width() + 1
+
+    win._toggle_expand(True)
+    for _ in range(3):
+        app.processEvents()
+    assert win.right.isVisible() and win.right.isWindow(), "扩展应为独立小窗"
+    assert in_screen(), "小窗应贴主窗右缘（贴屏时夹回屏幕内）"
+    assert win.rxview.width() == w0, "显示框不受影响"
+    win.move(60, 40)                       # 主窗移动 → 小窗跟随（贴屏时夹取）
+    for _ in range(3):
+        app.processEvents()
+    assert in_screen(), "主窗移动后小窗仍应在屏幕内"
+    # 用户点小窗 × 直接关闭 → 主窗按钮同步恢复"扩展"
+    win.right.close()
+    for _ in range(3):
+        app.processEvents()
+    assert not win.right.isVisible()
+    assert not win.btn_expand.isChecked(), "关闭小窗后扩展按钮应恢复"
+    # 再次打开（经按钮触发，勾选态真实）：高度与主窗客户区一致
+    win.btn_expand.setChecked(True)       # toggled → _toggle_expand(True)
+    for _ in range(3):
+        app.processEvents()
+    assert win.right.isVisible() and win.right.height() == win.height()
+    # 主窗右缘贴屏（最大化）时小窗夹回屏幕内，不得落到屏幕外（二十四轮 F1）
+    win.showMaximized()
+    QTest.qWait(200)
+    win._reposition_ext_window(keep_size=True)
+    for _ in range(3):
+        app.processEvents()
+    assert in_screen(), "最大化时小窗应夹取在屏幕内"
+    win.showNormal()
+    QTest.qWait(100)
+    # 主窗缩放时小窗跟随：高度与主窗客户区一致（二十八轮 F1）
+    win.resize(1250, 900)
+    QTest.qWait(100)
+    for _ in range(3):
+        app.processEvents()
+    assert win.right.height() == win.height(), "主窗拉高后小窗应同高"
+    # 主窗最小化时小窗隐藏、恢复时按按钮状态重新显示（二十八轮 F3）
+    win.showMinimized()
+    for _ in range(5):
+        app.processEvents()
+    assert not win.right.isVisible(), "最小化时小窗应隐藏"
+    win.showNormal()
+    for _ in range(5):
+        app.processEvents()
+    assert win.right.isVisible() and win.btn_expand.isChecked(), "恢复后小窗应重新显示"
+    win.btn_expand.setChecked(False)      # toggled → _toggle_expand(False)
+    for _ in range(3):
+        app.processEvents()
+    assert not win.right.isVisible()
+    assert win.rxview.width() == w0, "收起后显示框仍不变"
+
+
 # ---- 复审 P3: 运行中条目清空/order 全为 0，调度器自停须同步取消勾选 ----
 def test_ms_loop_autostop_syncs_checkbox(tmp_path):
     win = MainWindow(Settings(str(tmp_path / "loop2.json")))

@@ -51,7 +51,6 @@ QStatusBar { background: %(bar)s; color: %(fg)s; }
 QStatusBar::item { border: none; }
 QLabel#sbSeg { border: 1px solid %(border)s; border-radius: 1px;
   background: %(input)s; color: %(fg)s; padding: 1px 6px; }
-QSplitter::handle { background: %(border)s; }
 QCheckBox { spacing: 4px; }
 QProgressBar { border: 1px solid %(border)s; border-radius: 2px;
   background: %(input)s; text-align: center; color: %(fg)s; }

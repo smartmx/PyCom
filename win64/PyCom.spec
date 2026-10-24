@@ -68,8 +68,37 @@ a.binaries = [e for e in a.binaries if _keep(e)]
 a.datas = [e for e in a.datas if _keep(e)]
 pyz = PYZ(a.pure)
 
-# 只产出**单文件**便携版（规则：不再打包目录版）：
-# binaries/datas 全部内联进 exe，运行时解包到 sys._MEIPASS。
+# ---- 目录版（免解压：2026-10-24 打包指令恢复双产物）----
+# DLL/资源全部落在 dist/PyCom/ 文件夹内，启动零解包（快、且无杀软扫描
+# 解包落盘的放大）；使用时整个文件夹一起拷贝。
+exe_dir = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='PyCom',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_certificate_file=None,
+    entitlements_file=None,
+    icon=['assets/pycom.ico'],
+)
+coll = COLLECT(
+    exe_dir,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='PyCom',
+)
+
+# ---- 单文件版（便携：单个 exe 拷到哪都能跑，启动自解包到 %TEMP%）----
 exe = EXE(
     pyz,
     a.scripts,
@@ -88,7 +117,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
+    codesign_certificate_file=None,
     entitlements_file=None,
     icon=['assets/pycom.ico'],
 )

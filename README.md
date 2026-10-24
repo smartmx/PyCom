@@ -10,8 +10,8 @@
 
 | 目录 | 应用名 | 技术栈 | 目标系统 | 版本 |
 |---|---|---|---|---|
-| [`win64/`](win64/) | **PyCom** | Python 3.13（64 位）+ PySide6 / Qt6 | Windows 10+ | V0.0.4 |
-| [`win32/`](win32/) | **PyCom32** | Python 3.8.10（**32 位**）+ PySide2 / Qt5 | Windows 7 SP1+（32/64 位） | V0.0.4 |
+| [`win64/`](win64/) | **PyCom** | Python 3.13（64 位）+ PySide6 / Qt6 | Windows 10+ | V0.0.5 |
+| [`win32/`](win32/) | **PyCom32** | Python 3.8.10（**32 位**）+ PySide2 / Qt5 | Windows 7 SP1+（32/64 位） | V0.0.5 |
 
 `win32/` 是 `win64/` 的整树回迁副本 + 一层明确的 Qt5/32 位适配；功能只在
 win64 主线开发，win32 只同步修复（同步工具见下）。
@@ -49,20 +49,21 @@ Develop/
 cd win64
 pip install -r requirements.txt     # 已锁版本（应用依赖只有 PySide6）
 python main.py                      # 源码运行
-python -m pytest tests/             # 125 项单测
-tools\build_exe.bat                 # 打包 → dist\PyCom.exe（单文件，≈24MB）
+python -m pytest tests/             # 127 项单测
+tools\build_exe.bat                 # 打包 → dist\PyCom.exe + dist\PyCom\（双产物）
 
 # —— win32（PyCom32，需 32 位 Python 3.8.10 @ D:\Program Files\Python38-x32）——
 cd win32
 "D:\Program Files\Python38-x32\python.exe" -m pip install -r requirements.txt
 "D:\Program Files\Python38-x32\python.exe" main.py
-"D:\Program Files\Python38-x32\python.exe" -m pytest tests/     # 134 项单测
-tools\build_exe.bat                 # 打包 → dist\PyCom32.exe（单文件，≈20MB，Win7 可用）
+"D:\Program Files\Python38-x32\python.exe" -m pytest tests/     # 136 项单测
+tools\build_exe.bat                 # 打包 → dist\PyCom32.exe + dist\PyCom32\（双产物，Win7 可用）
 ```
 
-打包共同规则：**只出单文件版**（拷单个 exe 即可运行），打包前退出正在运行的
-程序；win32 打包后必跑 `python tools\audit_dist_win7.py` 与
-`python tools\audit_dist_win7.py vendor\ucrt-x86` 两条审计（期望“未发现
+打包共同规则：**双产物**（单文件版 + 目录版 exe/`_internal\`，2026-10-24 起），
+打包前退出正在运行的程序；win32 打包后必跑 `python tools\audit_dist_win7.py`、
+`python tools\audit_dist_win7.py dist\PyCom32` 与
+`python tools\audit_dist_win7.py vendor\ucrt-x86` 三条审计（期望“未发现
 Win7 兼容性风险项”）。详见 [docs/03-构建与打包.md](docs/03-构建与打包.md)。
 
 > 本目录以源码工程为本体；`win32/dist/PyCom32.exe` 是最近一次构建的交付物
@@ -96,7 +97,7 @@ pytest 实收是否一致——改测试忘改文档的条数漂移在此兜底�
 
 ## 当前状态（2026-10-22）
 
-- 两分支均为 V0.0.4；测试 win64 125 项 / win32 134 项全过（当日实跑）；
+- 两分支均为 V0.0.5（V0.0.4 已发布/提交）；测试 win64 127 项 / win32 136 项全过（当日实跑）；
 - 接收区右键可切换「复制/保存含时间戳和收发标记」（默认含，随 pycom.json 持久化）；
   网络 IPv4/IPv6 纯单栈（本地 IP 下拉含 :: 与各 v6 地址，选哪个族只收发哪个族）；
   鼠标选择复制 + 边缘自动滚屏、转换计算器 HEX 大小端、占用等待可取消均已入库；

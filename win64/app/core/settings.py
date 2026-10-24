@@ -97,7 +97,7 @@ DEFAULTS = {
     "term_key_echo": False,      # 本地回显按键值（仅按键方式）
     "term_0d_add_0a": True,      # 发送回车 0x0d 后自动加 0x0a
     # 窗口（对齐原版 794x639 比例）
-    "win_w": 900, "win_h": 660,
+    "win_w": 960, "win_h": 720,   # 默认按用户定稿参考尺寸（960×720）设计
 }
 
 

@@ -16,7 +16,7 @@ import sys
 import time
 from functools import partial
 
-from PySide6.QtCore import QProcess, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QProcess, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import (QActionGroup, QDesktopServices, QFont, QGuiApplication,
                            QIntValidator, QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QHeaderView,
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QSpinBox,
-                               QSplitter, QStyle,
+                               QStyle,
                                QStyleOptionButton, QStyledItemDelegate,
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
 
@@ -91,24 +91,14 @@ _NARROW_W = 920   # 窄窗阈值（2026-10-20 由 620 提升）：与文件块�
                   # 620~920 的宽度塞不下完整宽布局，列间会互相入侵
 
 
-class ClipBox(QWidget):
-    """SSCOM 式截断容器：对父布局贡献的最小**宽度**恒为 0，内部控件保持自然
-    宽度不被压缩；窗口缩窄时内部内容整体向右溢出、被窗口边缘直接裁掉
-    （不隐藏）——对齐原版缩窗行为。前提：内部非伸缩控件已钉住自然宽度。
-    高度保持自然最小值：只做横向截断，高度归零会把所在网格行压扁
-    （V0.0.4 实测回归：选项两列被挤扁、发送输入框长高）。"""
-
-    def minimumSizeHint(self):
-        return QSize(0, super().minimumSizeHint().height())
-
-
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
         self.cfg = settings
         self.setWindowTitle("PyCom 串口/网络数据调试器")
-        # 允许向左缩到串口配置框宽度（窄窗时右侧内容被窗口边缘截断，不隐藏）
-        self.setMinimumWidth(330)
+        # 允许向左缩到发送按钮右缘（≈282px）+ 边框余量；右侧内容被窗口
+        # 右缘截断（冻结画布保证固定控件原位）
+        self.setMinimumWidth(284)
         self.menuBar().setNativeMenuBar(False)   # 深色 QSS 才能作用于顶部菜单
         self._mode = self.cfg.d["mode"]
         self._encoding = self.cfg.d["encoding"]   # 由"编码"菜单/自定义对话框设置
@@ -139,14 +129,20 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        # 冻结画布（V0.0.5 用户要求：控件位置固定，收缩只从右边裁剪）：
+        # 全部内容放进 canvas，几何由 _apply_canvas_geometry 手工布置——
+        # 画布宽 = max(视口宽, 内容最小宽)。窗口收缩到内容最小宽以下时
+        # 画布不再变窄：控件保持原位、被窗口右缘截断，而不是被压缩/移位；
+        # 窗口更大时画布铺满视口，弹性区照常填充。高度始终铺满。
+        self.canvas = QWidget(central)
+        root = QVBoxLayout(self.canvas)
         root.setContentsMargins(4, 3, 4, 3)
         root.setSpacing(3)
 
-        # ---------- 顶区：接收区 | 多条发送（原 Panel2，默认隐藏） ----------
-        self.splitter = QSplitter(Qt.Horizontal)
+        # ---------- 接收显示框：独立于冻结画布，直接跟随主窗视口伸缩 ----------
+        # （V0.0.5 用户要求：显示框随窗口正常收缩/拉伸；冻结画布只管按钮行）
         self.rxview = RxView(self.builder, self.buf)
-        self.splitter.addWidget(self.rxview)
+        self.rxview.setParent(central)   # 主窗视口子控件（手工几何，不进布局）
 
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -185,13 +181,17 @@ class MainWindow(QMainWindow):
         from app.ui.calculator_dlg import CalculatorWidget
         self.tabs.addTab(CalculatorWidget(), "进制转换")   # 多字符串发送与ASCII码表之间
         self.tabs.addTab(self._build_ascii_table(), "ASCII码表")
-        self.splitter.addWidget(right)
-        # 原版比例：接收 Memo 357 : 多条发送 418 ≈ 46:54
-        # 扩展面板默认宽一些的接收区（46:54 太宽，用户要求收窄）
-        self.splitter.setStretchFactor(0, 62)
-        self.splitter.setStretchFactor(1, 38)
-        self.splitter.setSizes([62, 38])
-        root.addWidget(self.splitter, 1)
+
+        # ---------- 扩展面板：独立小窗（V0.0.5 用户定稿） ----------
+        # 不占主窗口布局：弹出后紧贴主窗口右缘（主窗移动/缩放时跟随），
+        # 显示框与主界面完全不受影响；WA_QuitOnClose=False 避免它拖住应用退出。
+        self.right = right
+        self.right.setParent(None)
+        self.right.setWindowFlags(Qt.Window)
+        self.right.setWindowTitle("PyCom 扩展")
+        self.right.setAttribute(Qt.WA_QuitOnClose, False)
+        self.right.installEventFilter(self)   # 捕获小窗 × 关闭，同步主窗按钮
+        self.right.setVisible(False)
 
         # ---------- 查找条（隐藏，Ctrl+F） ----------
         from app.ui.find_bar import FindBar
@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self._file_pad = 0             # 垫片上限（须先于首个 resizeEvent 存在）
         self.btn_open_file = QPushButton("打开文件")
         self.edit_file = QLineEdit()
+        self.edit_file.setFixedWidth(160)   # 设计宽（按参考图加宽 4 汉字；按钮簇恒定）
         self.edit_file.setPlaceholderText("发送文件路径")
         self.btn_send_file = QPushButton("发送文件")
         self.btn_stop_file = QPushButton("停止")
@@ -230,7 +231,9 @@ class MainWindow(QMainWindow):
         row5.addWidget(self.cb_auto_scroll)
         # 右侧可截断区（SSCOM 式缩窗）：文件块与右侧按钮保持自然宽度，
         # 缩窗时整区向右溢出、被窗口边缘裁掉，左侧各键永不压缩
-        self.tool_right = ClipBox()
+        # 普通容器（非 ClipBox）：内容最小宽计入画布下限——窗口收缩到该宽度
+        # 以下时画布冻结裁剪，工具行/选项行的按钮类控件位置恒定不被挤压
+        self.tool_right = QWidget()
         tr = QHBoxLayout(self.tool_right)
         tr.setContentsMargins(0, 0, 0, 0)
         tr.setSpacing(3)
@@ -238,11 +241,16 @@ class MainWindow(QMainWindow):
                   self.btn_send_file, self.btn_stop_file,
                   self.btn_clear_send):
             tr.addWidget(w)
-        tr.setStretchFactor(self.edit_file, 1)
-        tr.addStretch(1)
+        # 清发送区 与右侧按钮组之间固定留白（两个汉字宽；V0.0.5 用户要求）
+        tr.addSpacing(30)
+        # 行内不放 stretch：全部控件按设计宽固定排列——按钮类控件绝不随
+        # 窗口移动/压缩；超出画布下限的部分被窗口右缘裁剪（V0.0.5 定稿）
         for w in (self.btn_collapse, self.btn_keep_top,
                   self.btn_save_params, self.btn_expand):
             tr.addWidget(w)
+        # 行尾 stretch：独占全部增减——否则 Qt 会把剩余空间均分进条目间隙，
+        # 按钮组就会随窗口滑动（V0.0.5 定稿：按钮位置恒定的关键）
+        tr.addStretch(1)
         row5.addWidget(self.tool_right, 1)
         root.addLayout(row5)
 
@@ -446,7 +454,7 @@ class MainWindow(QMainWindow):
         p8.addStretch(1)        # 选项行贴顶，剩余高度让给发送输入框
         # 两列选项同包一个可截断容器：缩窗时保持各自宽度、被窗口边缘裁掉
         # （对齐 SSCOM 窄窗下 HEX显示/加时间戳 被截半的样子），不再整列隐藏
-        self.opt_box = ClipBox()
+        self.opt_box = QWidget()
         ob = QHBoxLayout(self.opt_box)
         ob.setContentsMargins(0, 0, 0, 0)
         ob.setSpacing(6)
@@ -494,7 +502,7 @@ class MainWindow(QMainWindow):
             self.cmb_checksum.addItem(_label, _kind)
         self.edit_checksum_view = QLineEdit()
         self.edit_checksum_view.setReadOnly(True)
-        self.edit_checksum_view.setMinimumWidth(96)
+        self.edit_checksum_view.setFixedWidth(96)
         self.edit_checksum_view.setToolTip("按当前发送内容实时计算的校验字节（HEX）")
         self.edit_checksum_view.setPlaceholderText("校验值")
         self._chk_sep = QFrame()                # 校验配置与前面分组之间的竖分隔线
@@ -508,8 +516,10 @@ class MainWindow(QMainWindow):
         p9r2.addStretch(1)
         p9.addLayout(p9r2)
         p9.addStretch(1)        # 同上：校验行贴顶
-        ob.addStretch(1)        # 左右两组撑开：接收选项靠左、发送选项贴右（V0.0.3 观感）
+        # 发送选项组紧随接收选项组固定（V0.0.5 定稿：两组内部控件与组间距
+        # 恒定，不随窗口移动）；行尾 stretch 吸收全部增减
         ob.addLayout(p9)
+        ob.addStretch(1)
 
         # 多行发送编辑框（原 Edit_Data 550x56，右侧留白对齐原版）
         self.send_edit = QPlainTextEdit()
@@ -529,11 +539,14 @@ class MainWindow(QMainWindow):
         g.setColumnStretch(1, 1)
         g.setColumnStretch(2, 0)
         g.setColumnStretch(3, 1)      # 发送编辑框跨到本列（行 1）：右缘贴窗口边
-        # 数字输入框：隐藏上下按钮，宽度限制在 5 位数字左右。
-        # IME 数字模式：数字直上屏、防中文输入法候选窗拦截（已在真实桌面验证不影响键盘输入）。
+        # 数字输入框：隐藏上下按钮，统一定宽（Qt5/Qt6 的 sizeHint 不同会使
+        # 两分支观感不一，固宽对齐）；IME 数字模式：数字直上屏、防中文输入法
+        # 候选窗拦截（已在真实桌面验证不影响键盘输入）。
+        self.sp_split_ms.setFixedWidth(48)    # 超时
+        self.sp_timed.setFixedWidth(62)       # 定时（容纳 7 位 3600000）
+        self.sp_chk_start.setFixedWidth(48)   # 第 N 字节
         for sb in (self.sp_split_ms, self.sp_timed, self.sp_chk_start):
             sb.setStyleSheet(_HIDE_SPIN_BTNS_QSS)
-            sb.setMaximumWidth(62)
             sb.setInputMethodHints(Qt.ImhDigitsOnly)
         self.cmb_baud.setInputMethodHints(Qt.ImhDigitsOnly)
         self.cmb_baud.lineEdit().setInputMethodHints(Qt.ImhDigitsOnly)
@@ -564,7 +577,8 @@ class MainWindow(QMainWindow):
         bar = self.statusBar()
         for w in (self.sb_state, self.sb_tx, self.sb_rx, self.sb_link):
             bar.addWidget(w)
-        bar.addPermanentWidget(QLabel(APP_VERSION))   # 右下角版本号
+        self.lbl_version = QLabel(APP_VERSION)
+        bar.addPermanentWidget(self.lbl_version)      # 右下角版本号（窄窗让位）
         bar.customContextMenuRequested.connect(lambda p: self._reset_counters())
         bar.setContextMenuPolicy(Qt.CustomContextMenu)
         self._ui_ready = True             # 窄窗切换等 resize 处理的前置条件
@@ -815,16 +829,45 @@ class MainWindow(QMainWindow):
         if sys.platform != "win32" or QApplication.platformName() != "windows":
             return
         try:
-            import ctypes
-            value = ctypes.c_int(1 if dark else 0)
-            hwnd = int(self.winId())
-            for attr in (20, 19):     # Win11 及 Win10 20H1+ / Win10 1809~1909
-                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                        ctypes.c_void_p(hwnd), attr, ctypes.byref(value),
-                        ctypes.sizeof(value)) == 0:
-                    break
+            self._dwm_dark_frame(int(self.winId()), 1 if dark else 0)
         except (OSError, AttributeError, ValueError):
             pass
+
+    def _dwm_dark_frame(self, hwnd, value):
+        """DWM 沉浸式暗色标题栏：attr 20（Win10 20H1+/Win11）优先、19 兜底。
+        读回等于目标值就只读不动（win32 侧扩展小窗逐帧 resize 的高频路径
+        零开销；win64 侧仅主题切换经 _apply_titlebar 调用，无逐帧调用方）；
+        **读不回时必须退回无条件设置**——原生窗重建后（实测拖动+关闭+重开
+        扩展小窗）get 会失败，若据此跳过设置，标题栏将停在白色。设置成功后
+        SetWindowPos(FRAMECHANGED) 强制非客户区重绘（只设属性不重绘时标题栏
+        停在旧色，直到偶发窗口事件）。"""
+        import ctypes
+        cur = ctypes.c_int(-1)
+        for probe in (20, 19):
+            if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                    ctypes.c_void_p(hwnd), probe, ctypes.byref(cur),
+                    ctypes.sizeof(cur)) == 0:
+                break
+        else:
+            cur = None                      # 读不回：不做比较，直接设置
+        if cur is not None and cur.value == value:
+            return
+        for attr in (20, 19):
+            v = ctypes.c_int(value)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd), attr, ctypes.byref(v),
+                    ctypes.sizeof(v)) == 0:
+                # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED|NOOWNERZORDER
+                ctypes.windll.user32.SetWindowPos(
+                    ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                    0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0200)
+                # 后台窗口的标题栏重绘会被 DWM 惰性化（实测非确定性滞后一
+                # 拍）：WM_NCACTIVATE 翻转一对强制其按当前属性重画标题栏
+                u32 = ctypes.windll.user32
+                active = 1 if u32.GetForegroundWindow() == hwnd else 0
+                u32.SendMessageW(ctypes.c_void_p(hwnd), 0x0086, 1 - active, 0)
+                u32.SendMessageW(ctypes.c_void_p(hwnd), 0x0086, active, 0)
+                break
 
     def _theme_name(self) -> str:
         return "dark" if self.act_theme.isChecked() else "light"
@@ -953,6 +996,9 @@ class MainWindow(QMainWindow):
         self.file_sender.failed.connect(self._file_failed)
 
     def eventFilter(self, obj, ev):
+        if obj is self.right and ev.type() == QEvent.Type.Close:
+            # 扩展小窗被用户点 × 直接关闭：主窗"扩展"按钮同步恢复未展开态
+            self._on_ext_closed()
         if obj in (self.rxview, self.rxview.viewport()):
             # 终端仿真（对齐 SSCOM）：光标放在接收显示窗口里直接输入指令。
             # 点击接收区后焦点可能在外框 RxView 上（见 _wire 注释），两个对象
@@ -1054,8 +1100,9 @@ class MainWindow(QMainWindow):
         # 自然大小。垫片可伸展、上限 = 发送按钮右缘与文件块自然起始的差值。
         # 字体度量是异步沉降的（启动早期偏小），故启动后分多拍重算垫片
         # （每拍整体重设、非累积），沉降后自动收敛
-        for d in (0, 300, 1000, 2500):
+        for d in (0, 300, 1000):
             QTimer.singleShot(d, self._update_file_pad)
+        QTimer.singleShot(2500, self._final_settle)   # 末拍：钉宽度 + 冻结参考宽
         # 菜单"启动立刻打开串口"勾选时自动打开（默认不勾选）
         if self.cfg.d["open_on_start"]:
             self._open_link()
@@ -1103,33 +1150,105 @@ class MainWindow(QMainWindow):
         文件行与状态栏；串口连接状态与收发不受影响。"""
         self.panel1.setVisible(not on)
         self.btn_collapse.setText("展开" if on else "收起")
+        self._apply_canvas_geometry()   # 可见性变了，画布高随 sizeHint 重排
 
     def _toggle_expand(self, on):
-        w = self.splitter.widget(1)
-        w.setVisible(on and not getattr(self, "_narrow", False))
+        """扩展面板（V0.0.5 定稿）：独立小窗——弹出后紧贴主窗口右缘，
+        主窗口移动/缩放时跟随；显示框与主界面布局完全不受影响。"""
         self.btn_expand.setText("扩展" if not on else "收起")
         if on:
-            # QSplitter 重新显示部件时不会沿用 setSizes 的比例，需显式按 62:38 分配
-            total = max(1, self.splitter.width())
-            self.splitter.setSizes([int(total * 0.62), int(total * 0.38)])
+            # 先布几何、再显示：弹出即贴右缘同高（先 show 再收拾会闪现旧
+            # 位置一帧）；显示后一拍按稳定最小宽再收口，避免宽度跳变
+            # （三十轮 F2，win32 侧另有深色标题栏预置，见各自实现）
+            self._reposition_ext_window()
+            self.right.show()
+            QTimer.singleShot(0, self._reposition_ext_window)
+        else:
+            self.right.hide()
+
+    def _reposition_ext_window(self, keep_size=False):
+        """把扩展小窗贴到主窗口右缘（顶对齐）；高度与主窗客户区一致——
+        两者标题栏同高，客户区一致即外框视觉等高（V0.0.5 用户要求）。
+        主窗右缘贴屏（如最大化）右侧放不下时改贴主窗左缘、再不行夹回
+        屏幕内——避免小窗整个落到屏幕外（二十四轮 F1）。"""
+        fg = self.frameGeometry()
+        if not keep_size:
+            self.right.resize(300, max(240, self.height()))
+        avail = self.screen().availableGeometry()
+        w, h = self.right.width(), self.right.height()
+        x = fg.right() + 1                       # 首选：主窗右缘外侧
+        if x + w > avail.right() + 1:            # 右侧放不下 → 主窗左缘外侧
+            x = fg.left() - w - 1
+        if x < avail.left():                     # 仍放不下 → 夹到屏幕左缘
+            x = avail.left() + 1
+        y = max(avail.top() + 1, fg.top())       # 上界夹取（二十八轮 F2）
+        if y + h > avail.bottom() + 1:           # 底部超出 → 上移夹取
+            y = max(avail.top() + 1, avail.bottom() + 1 - h)
+        self.right.move(x, y)
+
+    def _on_ext_closed(self):
+        """扩展小窗被用户直接关闭（点小窗标题栏 ×）：主窗按钮同步恢复。"""
+        if self.btn_expand.isChecked():
+            self.btn_expand.setChecked(False)   # toggled → _toggle_expand(False)
+
+    def moveEvent(self, ev):
+        super().moveEvent(ev)
+        if getattr(self, "right", None) is not None and self.right.isVisible():
+            self._reposition_ext_window(keep_size=True)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        self._apply_canvas_geometry()
         self._apply_narrow(self.width() < _NARROW_W)
         self._apply_file_pad()
+        # 扩展小窗跟随主窗缩放（二十八轮 F1：moveEvent 只覆盖"移动"，
+        # 拖右/下缘改尺寸时位置不变、moveEvent 不触发——需在此重贴边）
+        if getattr(self, "right", None) is not None and self.right.isVisible():
+            self._reposition_ext_window()
+
+    def changeEvent(self, ev):
+        super().changeEvent(ev)
+        # 主窗最小化时隐藏扩展小窗（独立顶层窗不随主窗最小化，会孤零零
+        # 留在桌面），恢复时按扩展按钮状态重新显示并贴边（二十八轮 F3）
+        if ev.type() == QEvent.Type.WindowStateChange and hasattr(self, "right"):
+            if self.isMinimized():
+                if self.right.isVisible():
+                    self._ext_was_open = True
+                    self.right.hide()
+            elif getattr(self, "_ext_was_open", False):
+                self._ext_was_open = False
+                self.right.show()
+                # 恢复瞬间的几何可能是最小化期的伪值：延后一拍到真实几何
+                # 再贴边（二十九轮 V1 真机时序预防）
+                QTimer.singleShot(0, self._reposition_ext_window)
+
+    def _apply_canvas_geometry(self):
+        """视口几何（V0.0.5 定稿）：接收显示框直接占满主窗视口宽（跟随窗口
+        伸缩）；底部画布（查找条/工具行/进度条/面板）宽 = max(视口宽, 内容
+        最小宽)、贴底固定高——窗口收缩到固定控件所需最小宽以下时画布冻结，
+        按钮类控件保持原位、只被窗口右缘裁剪。"""
+        central = self.centralWidget()
+        if central is None or not hasattr(self, "canvas"):
+            return
+        cw, ch = central.width(), central.height()
+        w = max(cw, self.canvas.minimumSizeHint().width())
+        h = self.canvas.sizeHint().height()
+        top = max(90, ch - h - 3)                # 显示框高度下限（极矮窗口兜底）
+        self.rxview.setGeometry(4, 3, cw - 8, top)
+        self.canvas.setGeometry(0, 3 + top + 3, w, ch - 3 - top - 3)
 
     def _apply_narrow(self, on: bool):
         """窄窗（对齐 SSCOM）：右侧控件不再隐藏——工具行右区与选项两列保持
-        自然宽度、被窗口边缘截断（ClipBox 溢出）；此处只处理无法截断的浮层
-        与停靠件：扩展面板收起、查找条隐藏、状态栏连接信息让位。"""
+        自然宽度、被窗口边缘截断（ClipBox 溢出）；此处只处理无法截断的浮层：
+        查找条隐藏、状态栏连接信息让位（扩展面板是独立小窗，不随窄窗隐藏）。"""
         if not getattr(self, "_ui_ready", False):
             return
         if getattr(self, "_narrow", None) == on:
             return
         self._narrow = on
-        # 扩展面板：窄窗隐藏；展宽后按扩展按钮原状态恢复
-        self.splitter.widget(1).setVisible(self.btn_expand.isChecked() and not on)
+        # 窄窗让位：状态栏连接信息与版本号隐藏（版本随时可在"关于"查看）
         self.sb_link.setVisible(not on)
+        self.lbl_version.setVisible(not on)
         # 查找条在窄窗下会被挤到不可用宽度：窄窗隐藏，展宽后按原状态恢复
         if on:
             if self.find_bar.isVisible():
@@ -1138,6 +1257,7 @@ class MainWindow(QMainWindow):
         elif getattr(self, "_find_bar_was_open", False):
             self._find_bar_was_open = False
             self.find_bar.show()
+        self._apply_canvas_geometry()   # 查找条显隐改画布高，重排（窄窗让位）
 
     def _activate_find(self):
         """查找入口（菜单/Ctrl+F）：窄窗下查找条没有可用宽度，提示先拉宽窗口。"""
@@ -1796,21 +1916,30 @@ class MainWindow(QMainWindow):
         for w in self._opt_widgets[1:]:   # [0] 是发送输入框（保持可伸缩）
             w.setFixedWidth(min(w.sizeHint().width(), w.maximumWidth()))
 
+    def _final_settle(self):
+        """沉降末拍（V0.0.5 定稿）：按钮类控件钉死自然宽——行内中缝吸收
+        拉伸/收缩（右组贴右缘、文件块与选项组不压缩），超出中缝后整体被
+        窗口右缘裁剪；输入框/显示框保持弹性、跟随窗口伸缩。"""
+        self._update_file_pad()
+        self.send_edit.setMinimumWidth(120)   # 发送框：可压缩的下限
+        self._apply_canvas_geometry()
+
     def _update_file_pad(self):
-        """重算并应用文件块垫片：文件块起始横坐标 = 左下角"发送"按钮的右缘。
-        用已渲染控件的真实坐标做差（垫片左侧的控件位置与垫片值无关，可安全
-        实测）；"自动滚屏"在新窗口右侧，其宽度与行间距必须一并计入。
-        每拍整体重设、非累积。"""
+        """重算并应用文件块垫片：文件块起始横坐标 = 左下角"发送"按钮的右缘
+        再加一个英文字符宽（+8，用户要求）。用已渲染控件的真实坐标做差（垫片
+        左侧的控件位置与垫片值无关，可安全实测）；"自动滚屏"在新窗口右侧，
+        其宽度与行间距必须一并计入。每拍整体重设、非累积。"""
         self._fix_natural_widths()
         x_of = lambda wgt: wgt.mapTo(self, wgt.rect().topLeft()).x()
         target = x_of(self.btn_send) + self.btn_send.width()      # 发送按钮右缘
         pre = x_of(self.cb_auto_scroll) + self.cb_auto_scroll.width()
-        self._file_pad = max(0, target - pre - 2 * 3)  # 2 处行间距：滚屏→垫片、垫片→打开文件
+        self._file_pad = max(0, target - pre - 2 * 3 + 8)  # 2 处行间距 + 打开文件右移一个英文字符宽
         self._apply_file_pad()
 
     def _apply_file_pad(self):
         """应用垫片（用户要求：文件块起始横坐标恒定 = 左下角"发送"按钮的
-        右缘，任何窗口宽度都显示并对齐；窗口极窄时路径框/右侧按钮自然裁剪）。"""
+        右缘再加一个英文字符宽，任何窗口宽度都显示并对齐；窗口极窄时路径框/
+        右侧按钮自然裁剪）。"""
         self.spacer_file.setFixedWidth(self._file_pad)
 
     def _refresh_ports(self, select=None):
